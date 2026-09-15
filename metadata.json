@@ -1,0 +1,7 @@
+{
+  "name": "DIYELECTRONICS",
+  "description": "Interactive DIY electronics repair guides, AI diagnostics, circuit simulation, spare parts marketplace, and community forum for sustainable device longevity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
