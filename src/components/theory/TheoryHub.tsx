@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useRef } from 'react';
+import { getBookLanguage, setBookLanguage, useDomTranslate } from '../../lib/translate';
+import LanguagePicker from '../LanguagePicker';
+import { Languages, X as XIcon } from 'lucide-react';
 import { BookOpenCheck, BookOpen, GraduationCap, Timer, Gauge, Award } from 'lucide-react';
 import { RouteLink } from '../../hooks/usePathname';
 import type { ThemeConfig } from '../../lib/theme';
@@ -73,6 +76,12 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
+  // Exams are translated into the same language as the Theory book (default: the device language).
+  const [examLang, setExamLang] = useState(() => getBookLanguage());
+  const [langOpen, setLangOpen] = useState(false);
+  const examRef = useRef<HTMLDivElement>(null);
+  const examTr = useDomTranslate(examRef, examLang, [route.tab, route.subject]);
+
   const primary = themeConfig?.primaryBg || 'bg-gradient-to-r from-indigo-600 to-violet-500';
   const tabs = [
     { id: 'library' as const, label: 'Theory', icon: BookOpenCheck, hint: 'A–Z study library' },
@@ -141,7 +150,23 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
         />
       )}
       {route.tab === 'exam' && (
+        <div className="flex items-center justify-end gap-2 -mb-2" data-notranslate>
+          {examTr.busy && <span className="text-xs text-slate-500">Translating…</span>}
+          <button type="button" onClick={() => setLangOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"><Languages className="w-4 h-4" /> {examLang.native}</button>
+        </div>
+      )}
+      {langOpen && (
+        <div className="fixed inset-0 z-[80] bg-black/50 flex items-end sm:items-center justify-center" onClick={() => setLangOpen(false)} data-notranslate>
+          <div className="w-full sm:max-w-md h-[75dvh] bg-white dark:bg-slate-900 rounded-t-2xl sm:rounded-2xl flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="h-12 px-3 flex items-center justify-between border-b border-slate-200 dark:border-slate-800"><p className="text-sm font-semibold">Exam language</p><button type="button" onClick={() => setLangOpen(false)} className="p-2" aria-label="Close"><XIcon className="w-4 h-4" /></button></div>
+            <div className="flex-1 min-h-0"><LanguagePicker value={examLang.code} onChange={l => { setExamLang(l); setBookLanguage(l.code); setLangOpen(false); }} /></div>
+          </div>
+        </div>
+      )}
+      {route.tab === 'exam' && (
+        <div ref={examRef} dir={examLang.rtl ? 'rtl' : 'ltr'}>
         <ExamRoom key={route.subject || 'all'} initialSubject={THEORY_SUBJECTS.some(s => s.id === route.subject) ? route.subject as TheorySubjectId : undefined} onStudyTopic={id => navigate({ tab: 'library', topicId: id })} primaryClass={primary} />
+        </div>
       )}
       {route.tab === 'courses' && (
         <Courses courses={courses} onCourseComplete={(id, title) => onCourseComplete?.(id, title)} embedded />

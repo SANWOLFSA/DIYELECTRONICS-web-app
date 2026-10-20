@@ -3,6 +3,7 @@ import path from "path";
 import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { initialParts, initialGuides } from './src/data';
+import { HELP_TEXT } from './src/data/helpContent';
 
 export const app = express();
 const PORT = 3000;
@@ -33,20 +34,25 @@ export function rateLimitOk(ip: string): boolean {
   return bucket.count <= RATE_MAX_REQUESTS;
 }
 
+const translateBuckets = new Map<string, { count: number; resetAt: number }>();
 app.use((req, res, next) => {
   if (req.method !== 'POST') return next();
   const now = Date.now();
   const ip = getClientIp(req);
-  let bucket = rateBuckets.get(ip);
+  // Page translation sends many small batches: it has its own, larger allowance.
+  const isTranslate = req.path === '/api/translate';
+  const buckets = isTranslate ? translateBuckets : rateBuckets;
+  const max = isTranslate ? 150 : RATE_MAX_REQUESTS;
+  let bucket = buckets.get(ip);
   if (!bucket || bucket.resetAt <= now) {
     bucket = { count: 0, resetAt: now + RATE_WINDOW_MS };
-    rateBuckets.set(ip, bucket);
+    buckets.set(ip, bucket);
   }
   bucket.count += 1;
-  if (rateBuckets.size > 10000) {
-    for (const [key, b] of rateBuckets) if (b.resetAt <= now) rateBuckets.delete(key);
+  if (buckets.size > 10000) {
+    for (const [key, b] of buckets) if (b.resetAt <= now) buckets.delete(key);
   }
-  if (bucket.count > RATE_MAX_REQUESTS) {
+  if (bucket.count > max) {
     res.setHeader('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
     return res.status(429).json({ error: 'Too many requests. Please wait a few minutes and try again.' });
   }
@@ -337,6 +343,7 @@ const CHAT_PERSONAS: Record<string, string> = {
   codefox: `You are CODEFOX, the DIY Electronics embedded-systems expert. You help with microcontrollers (Arduino, ESP32, Raspberry Pi, STM32), firmware, and C/C++/Python code. Give complete, working code examples, debugging tips and exact wiring (pin to pin). Apply the same answer-first, one-question, "Next:" style; the step-by-step method applies to debugging hardware and code.`,
   circuitbear: `You are CIRCUITBEAR, the DIY Electronics circuit-design expert. You help with circuit theory, calculations (show the formula and the numbers), PCB layout, power delivery and schematic analysis.`,
   tutor: `You are a friendly, precise electrical and electronics engineering tutor inside the DIY Electronics study app. Teach step by step, show units in every calculation, use SI units and South African conventions where relevant (230/400 V, 50 Hz, SANS 10142-1). Keep answers focused (under about 250 words unless asked for more) with short Markdown headings, bullets and inline formulas. If a question involves live mains work, remind the student about safe isolation. If you are not sure of a fact, say so.`,
+  help: `You are the DIY Electronics in-app Help Assistant. Answer questions about HOW TO USE THE APP, using only the help guide below. Give short numbered steps, name the exact buttons and menus, and say plainly when the guide does not cover something (suggest emailing support). For repair questions, suggest asking SANWOLF in the AI Assistant.\n\nHELP GUIDE:\n${HELP_TEXT}`,
   'phone-repair': `You are the DIY Electronics phone repair expert. Write practical, step-by-step troubleshooting and repair guides for smartphones. Include a "Required tools" section when relevant.`,
 };
 // Older clients used the persona id "sanwolf" for the main assistant.
@@ -380,8 +387,10 @@ export async function prepareChat(body: any): Promise<ChatPrep> {
   const isTutor = mode === 'tutor';
   // Optional study context from the Theory pages (topic summary / formulas); plain text, capped.
   const context = isTutor && typeof body?.context === 'string' ? body.context.slice(0, 1200) : '';
+  const isHelp = mode === 'help';
   const instruction = isTutor
     ? `${persona}${context ? `\n\nStudy context (from the app):\n${context}` : ''}\n\n${CHAT_SAFETY_RULES}`
+    : isHelp ? persona
     : `${persona}\n\n${CHAT_METHOD}\n\n${CHAT_SAFETY_RULES}`;
 
   let historyChars = current.images.reduce((n, i) => n + i.data.length, 0);
@@ -414,7 +423,7 @@ export async function prepareChat(body: any): Promise<ChatPrep> {
 
   const boardQuery = typeof body?.boardQuery === 'string' && body.boardQuery.trim()
     ? body.boardQuery.trim().slice(0, 80)
-    : (body?.lookupBoards === false || isTutor ? null : detectBoardQuery(message));
+    : (body?.lookupBoards === false || isTutor || isHelp ? null : detectBoardQuery(message));
   const lookupPromise = boardQuery ? lookupBoardOnline(boardQuery, 6000).catch(() => null) : Promise.resolve(null);
   // Board evidence is useful but must not delay the first words: wait at most ~1.2 s for it.
   const evidence = boardQuery ? await withTimeout(lookupPromise, 1200, null as any) : null;
@@ -428,11 +437,11 @@ export async function prepareChat(body: any): Promise<ChatPrep> {
 
   const hasImages = current.images.length > 0 || historyImages > 0;
   // Short, text-only questions (and every tutor question) go to the fastest models first.
-  const fast = isTutor || (!hasImages && message.length < 160 && rawHistory.length <= 6);
+  const fast = isTutor || isHelp || (!hasImages && message.length < 160 && rawHistory.length <= 6);
   const cacheKey = hasImages ? null : crypto.createHash('sha256')
     .update(JSON.stringify([mode || 'copilot', context, rawHistory.slice(-4).map((h: any) => [h.role, h.text]), message.trim().toLowerCase(), evidence?.web?.length || 0]))
     .digest('hex');
-  return { contents, instruction, mode: isTutor ? 'tutor' : (mode || 'copilot'), fast, hasImages, cacheKey, boardQuery, lookupPromise };
+  return { contents, instruction, mode: isTutor ? 'tutor' : isHelp ? 'help' : (mode || 'copilot'), fast, hasImages, cacheKey, boardQuery, lookupPromise };
 }
 
 async function boardPayload(prep: ChatPrep, waitMs: number) {
@@ -468,7 +477,7 @@ app.post("/api/chat", async (req, res) => {
 // Events are newline-delimited JSON: {"t":"text chunk"} ... then {"done":true,"board":...} or {"error":"..."}.
 // Served by netlify/functions/chat-stream.mts on Netlify (a streaming function; the Express
 // wrapper buffers) and by the Express route below locally.
-const FAST_MODELS = (process.env.GEMINI_FAST_MODELS || 'gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.1-flash-lite-preview,gemini-3.6-flash').split(',').map((m) => m.trim()).filter(Boolean);
+const FAST_MODELS = (process.env.GEMINI_FAST_MODELS || 'gemini-3.1-flash-lite,gemini-flash-lite-latest,gemini-3.5-flash-lite,gemini-3.1-flash-lite-preview,gemini-3.6-flash').split(',').map((m) => m.trim()).filter(Boolean);
 export type ChatStreamEvent = { t?: string; done?: boolean; board?: any; error?: string; model?: string; cached?: boolean; ttft?: number };
 
 export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEvent> {
@@ -543,7 +552,7 @@ export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEven
       hedge = setTimeout(launch, hedgeMs);
     };
     launch();
-    if (prep.fast) launch(); // two fast models from the start: whichever speaks first wins
+    if (prep.fast) { launch(); launch(); } // three fast models from the start: whichever speaks first wins
     setTimeout(() => finish(null), deadline - Date.now() + 200);
   });
 
@@ -3328,6 +3337,86 @@ app.post('/api/circuit-map', async (req, res) => {
     });
   } catch (e: any) {
     console.error('circuit-map failed:', e?.message || e);
+    res.status(503).json({ error: AI_UNAVAILABLE });
+  }
+});
+
+// ==== Translation: page text, Theory book, guides, and video subtitles ======================
+// Any language (the client sends a language name + code). Short strings are batched; results are
+// cached in memory here and in localStorage / Firestore in the browser.
+const translateCache = new Map<string, string>();
+const tKey = (lang: string, s: string) => crypto.createHash('sha1').update(lang + '\u0000' + s).digest('base64');
+
+app.post('/api/translate', async (req, res) => {
+  const lang = s(req.body?.lang, 20);
+  const langName = s(req.body?.langName, 60) || lang;
+  const texts: string[] = Array.isArray(req.body?.texts) ? req.body.texts.filter((x: any) => typeof x === 'string').slice(0, 200).map((x: string) => x.slice(0, 2000)) : [];
+  if (!lang || !texts.length) return res.status(400).json({ error: 'Nothing to translate.' });
+  if (texts.reduce((n, x) => n + x.length, 0) > 30000) return res.status(400).json({ error: 'Too much text in one request.' });
+  const out: (string | null)[] = texts.map((x) => translateCache.get(tKey(lang, x)) ?? null);
+  const missing = texts.map((x, i) => ({ x, i })).filter((m) => out[m.i] === null);
+  if (!missing.length) return res.json({ translations: out, cached: true });
+  const ai = getGeminiClient();
+  if (!ai) return res.status(503).json({ error: AI_NOT_CONFIGURED });
+  const prompt = `Translate each string in this JSON array from its original language into ${langName} (language code "${lang}").
+Return ONLY a JSON array of strings with exactly ${missing.length} items, in the same order.
+Rules: keep numbers, units (V, A, Ω, µF, Hz, W), formulas, symbols, part numbers, model numbers, brand names, URLs, emoji and Markdown exactly as they are. Keep leading/trailing spaces and punctuation style. Use clear, everyday ${langName} that a student or technician understands; use the usual technical terms in ${langName} (or the English term in brackets if there is no common word).
+${JSON.stringify(missing.map((m) => m.x))}`;
+  try {
+    const text = await callGeminiWithCascade(ai, [{ role: 'user', parts: [{ text: prompt }] }], undefined, undefined,
+      { responseMimeType: 'application/json', __models: orderModels(FAST_MODELS), __thinking: 'MINIMAL', __budgetMs: 22000 });
+    let arr: any = null;
+    try { arr = JSON.parse(text); } catch { const m = /\[[\s\S]*\]/.exec(text); if (m) try { arr = JSON.parse(m[0]); } catch { /* ignore */ } }
+    if (!Array.isArray(arr) || arr.length !== missing.length) return res.status(502).json({ error: 'The translation came back incomplete. Please try again.' });
+    missing.forEach((m, k) => {
+      const v = typeof arr[k] === 'string' ? arr[k] : m.x;
+      out[m.i] = v;
+      if (translateCache.size > 20000) translateCache.clear();
+      translateCache.set(tKey(lang, m.x), v);
+    });
+    res.json({ translations: out });
+  } catch (e: any) {
+    console.warn('translate failed:', e?.message || e);
+    res.status(503).json({ error: AI_UNAVAILABLE });
+  }
+});
+
+// Subtitles for an uploaded video (Firebase Storage), transcribed + translated by Gemini as WebVTT.
+// Free tier: the video is sent inline, so it must be under ~18 MB (about 2-4 minutes of phone video)
+// and the answer must arrive within the 30 s function limit.
+const captionCache = new Map<string, string>();
+const MAX_CAPTION_VIDEO_BYTES = 18 * 1024 * 1024;
+app.post('/api/video-captions', async (req, res) => {
+  const url = typeof req.body?.url === 'string' ? req.body.url : '';
+  const lang = s(req.body?.lang, 20);
+  const langName = s(req.body?.langName, 60) || lang;
+  let host = '';
+  try { host = new URL(url).hostname; } catch { /* invalid */ }
+  if (!/^firebasestorage\.googleapis\.com$|\.firebasestorage\.app$/.test(host)) return res.status(400).json({ error: 'Only videos uploaded to DIY Electronics can be subtitled here.' });
+  if (!lang) return res.status(400).json({ error: 'Choose a language.' });
+  const ck = `${url}|${lang}`;
+  if (captionCache.has(ck)) return res.json({ vtt: captionCache.get(ck), cached: true });
+  const ai = getGeminiClient();
+  if (!ai) return res.status(503).json({ error: AI_NOT_CONFIGURED });
+  try {
+    const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) }).catch(() => null);
+    const len = Number(head?.headers.get('content-length') || 0);
+    if (len > MAX_CAPTION_VIDEO_BYTES) return res.status(413).json({ error: 'This video is too long for free automatic subtitles (limit about 18 MB). Try a shorter clip.' });
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return res.status(502).json({ error: 'Could not download the video.' });
+    const mimeType = (r.headers.get('content-type') || 'video/mp4').split(';')[0];
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > MAX_CAPTION_VIDEO_BYTES) return res.status(413).json({ error: 'This video is too long for free automatic subtitles (limit about 18 MB). Try a shorter clip.' });
+    const prompt = `Transcribe the speech in this video and translate it into ${langName} (code "${lang}"). Return ONLY valid WebVTT subtitles: start with "WEBVTT", then cues with timestamps in HH:MM:SS.mmm --> HH:MM:SS.mmm format matching when each phrase is spoken, each cue at most 2 short lines. If there is no speech, describe the important on-screen actions briefly in ${langName} as cues instead. Keep part numbers, voltages and brand names unchanged.`;
+    const text = await callGeminiWithCascade(ai, [{ role: 'user', parts: [{ inlineData: { mimeType: /^video\//.test(mimeType) ? mimeType : 'video/mp4', data: buf.toString('base64') } }, { text: prompt }] }], undefined, undefined,
+      { __models: orderModels(FAST_MODELS), __thinking: 'MINIMAL', __budgetMs: Math.max(8000, 24000) });
+    let vtt = text.replace(/^```(?:vtt|webvtt)?\s*/i, '').replace(/```\s*$/, '').trim();
+    if (!/^WEBVTT/.test(vtt)) vtt = `WEBVTT\n\n${vtt}`;
+    if (!/-->/.test(vtt)) return res.status(502).json({ error: 'Could not make subtitles for this video.' });
+    captionCache.set(ck, vtt);
+    res.json({ vtt });
+  } catch (e: any) {
+    console.warn('video-captions failed:', e?.message || e);
     res.status(503).json({ error: AI_UNAVAILABLE });
   }
 });

@@ -1,6 +1,8 @@
 // Guide page: /guides/view/:id — numbered steps with images, tools & parts (fix kit) with shop links,
 // difficulty / time, "I fixed it" counter, comments on every step and on the whole guide.
 import { useEffect, useMemo, useState } from 'react';
+import { TranslatableVideo } from '../VideoTranslator';
+import { USER_CONTENT_NOTE } from '../../config/policy';
 import { Clock, CheckCircle2, MessageSquare, Pencil, Trash2, Wrench, Package, AlertTriangle, ShieldOff, ArrowLeft, X, Share2, Check } from 'lucide-react';
 import { usePathname, navigate, RouteLink } from '../../hooks/usePathname';
 import { useAdminStatus } from '../../lib/admin';
@@ -133,10 +135,11 @@ export default function GuideView({ onOpenAuth }: { onOpenAuth?: () => void }) {
         <section className={`${card} p-5 space-y-3`}>
           <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">{guide.kind === 'teardown' ? 'Teardown video' : 'Video'}</h2>
           {/firebasestorage\.googleapis\.com|\.(mp4|webm|mov)(\?|$)/i.test(guide.videoUrl) ? (
-            <video src={guide.videoUrl} controls preload="metadata" playsInline className="w-full max-h-[70vh] rounded-xl bg-black" />
+            <TranslatableVideo src={guide.videoUrl} className="w-full max-h-[70vh] rounded-xl overflow-hidden bg-black" />
           ) : (
             <a href={guide.videoUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-bold text-indigo-600 hover:underline break-all">Watch the video ↗</a>
           )}
+          <p className="text-[10px] leading-snug text-slate-400">{USER_CONTENT_NOTE}</p>
         </section>
       ) : null}
 

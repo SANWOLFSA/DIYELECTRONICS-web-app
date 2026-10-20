@@ -1,3 +1,4 @@
+import { ReportButton } from '../ReportButton';
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
@@ -241,6 +242,11 @@ export default function CommunityPostCard({
           Share
         </button>
       </div>
+      {!mine && post.authorUid && (
+        <div className="flex justify-end -mt-1">
+          <ReportButton targetType="user" targetId={post.authorUid} targetLabel={`${post.authorName}: ${post.title}`.slice(0, 200)} />
+        </div>
+      )}
 
       <AnimatePresence initial={false}>
         {open && (

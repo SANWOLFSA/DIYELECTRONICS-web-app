@@ -1,3 +1,4 @@
+import { ReportButton, CommunityReviews } from './ReportButton';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -551,6 +552,8 @@ function BuyModal({
             <textarea required rows={4} value={message} onChange={e => setMessage(e.target.value)} className={inputCls} maxLength={2000} />
           </div>
           <p className="text-[11px] text-slate-400">No payment is taken here. Your contact details are only shared with this seller.</p>
+          <CommunityReviews targetType="listing" targetId={item.id} title="Reviews of this listing" />
+          <div className="flex justify-start"><ReportButton targetType="listing" targetId={item.id} targetLabel={`${item.title} (${item.seller.name})`} /></div>
           <ErrorNote msg={err} />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className={ghostBtn}>Cancel</button>
@@ -612,6 +615,7 @@ function SellerProfileModal({
           </div>
         </div>
 
+        <div className="flex justify-end -mt-3"><ReportButton targetType="seller" targetId={uid} targetLabel={name} /></div>
         {profile?.bio && <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{profile.bio}</p>}
         {verified && (
           <p className="text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/40 rounded-xl p-3">
@@ -640,6 +644,8 @@ function SellerProfileModal({
             </div>
           )}
         </div>
+
+        <CommunityReviews targetType="seller" targetId={uid} />
 
         {listings.length > 0 && (
           <div className="space-y-2">

@@ -3,6 +3,7 @@
 // video upload to Firebase Cloud Storage (src/lib/guideMedia.ts); https links still work too.
 // Teardowns need at least one photo on every step before they can be published.
 import { useEffect, useState } from 'react';
+import { CONTENT_POLICY_SHORT } from '../../config/policy';
 import { Plus, Trash2, ArrowUp, ArrowDown, Save, Send, Image as ImageIcon, AlertTriangle, ArrowLeft, Video, Loader2, X } from 'lucide-react';
 import { usePathname, navigate, RouteLink } from '../../hooks/usePathname';
 import {
@@ -167,6 +168,7 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
           <RouteLink to="/guides" className="text-xs font-bold text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1"><ArrowLeft className="w-3.5 h-3.5" /> Guides</RouteLink>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-50">{editId ? 'Edit guide' : kind === 'teardown' ? 'Create a teardown' : 'Create a repair guide'}</h1>
           <p className="text-xs text-slate-500">{status === 'published' ? 'Published guide: changes go live when you publish again.' : 'Drafts are only visible to you until you publish.'}</p>
+          <p className="text-[11px] text-slate-400 max-w-xl">{CONTENT_POLICY_SHORT} You are responsible for what you publish; DIY Electronics does not endorse user procedures. <a href="/about#content-policy" className="underline">Content policy</a></p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => save(false)} disabled={busy} className={btnGhost}><Save className="w-3.5 h-3.5" /> Save draft</button>

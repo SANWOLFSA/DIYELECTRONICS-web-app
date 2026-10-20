@@ -1,0 +1,69 @@
+// How-to content for the Help page. Also used (server-side) to ground the AI Help Assistant,
+// so keep it accurate when features change.
+export interface HelpTopic { id: string; title: string; steps: string[] }
+
+export const HELP_TOPICS: HelpTopic[] = [
+  { id: 'ai', title: 'Ask the AI repair assistant (SANWOLF)', steps: [
+    'Open AI Assistant from the menu. Tap the name at the top to switch between SANWOLF (repairs), CODEFOX (code/firmware) and CIRCUITBEAR (circuit design).',
+    'Type the device, model and what it is doing (e.g. "Samsung UA43TU7000 has sound but no picture"). Answers appear word by word.',
+    'Tap + to take a photo with the camera, upload photos from your gallery, or upload a video (the AI looks at key frames). Add a question and send.',
+    'When you name a board or model number, real board photos and listings found online (iFixit, Wikipedia, Wikimedia Commons) appear under the answer with their sources.',
+    'Tap the expand icon (top right) for full screen. "New chat" starts over. AI answers can be wrong: always confirm with your meter and the service manual.',
+  ] },
+  { id: 'circuit-map', title: 'Map a circuit (red-flashing parts to test)', steps: [
+    'In the AI Assistant tap + then "Map circuit".',
+    'Either type a board or model number (e.g. "Samsung UA43") or attach a clear photo of the board, then tap the map button. Add the fault if you know it.',
+    'With a photo, the map is drawn on your own picture: parts to check flash red. With a board number, pick one of the web photos and tap "Map circuit on this photo".',
+    'Tap a flashing part to see why it is suspect, what to measure and the expected value. The "Block diagram & power flow" tab shows how power flows through the board, with the same suspects flashing.',
+    'Circuit maps are AI-generated and approximate. Discharge big capacitors before touching a power board.',
+  ] },
+  { id: 'multimeter', title: 'Multimeter Lab: test any component', steps: [
+    'Open Theory & courses, then Multimeter (or go to /multimeter). "How it works" explains every dial position.',
+    'Open "Test a component", pick a part (resistor, capacitor, diode, transistor, MOSFET, relay, fuse, battery...).',
+    'The "See it" panel shows the meter dial set to the right position, which jacks to use, and the part with the red and black probes on the correct pins, step by step, with good and bad readings.',
+    'Follow the safety step first: power off and discharge capacitors (except for tests marked as powered). "Practise this test" lets you try it on a simulated part.',
+  ] },
+  { id: 'book', title: 'Read the Theory book and take chapter exams', steps: [
+    'Open Theory & courses and tap "Read as book". Swipe left or right to turn pages; the slider at the bottom jumps anywhere; your last page is remembered.',
+    'The list icon opens the contents, the search icon finds any topic, term or formula (typos are fine), and the A–Z icon opens the glossary.',
+    'Tap a dotted word to see its definition. Each chapter starts with an introduction and a "What is…?" question, and ends with a summary and the chapter exam.',
+    'The language button (top bar) translates the book and exams into any language; it starts with your phone\'s language. The rest of the app stays in English.',
+    'In an exam answer every question, then tap Finish to see your score, your answer, the correct answer and an explanation for each question. Retake any time; your best score is kept (and saved to your account when signed in).',
+  ] },
+  { id: 'upload', title: 'Upload a repair video, guide or teardown', steps: [
+    'Videos: open a device page, go to the community videos section and tap "Share a video". Upload a file (MP4, WebM or MOV) or paste a YouTube/Vimeo link, add a title and description, and share.',
+    'Guides and teardowns: open a device page or Guides and tap "Write a guide" (or "Teardown"). Add steps with photos; teardowns need at least one photo on every step. You can add an optional video. Save a draft or Publish.',
+    'You are responsible for what you post. Repair videos are never blocked; only inappropriate pictures or videos (sexual content, assault, violence, hate) are removed after an admin reviews a report.',
+  ] },
+  { id: 'translate', title: 'Translate a video', steps: [
+    'Uploaded videos: tap "Translate" in the top corner of the video and pick any language. The AI writes subtitles in that language (this takes a few seconds; short clips under about 18 MB work best on the free plan). Subtitles are saved so the next viewer gets them instantly.',
+    'YouTube videos: tap "Translate" and pick a language: the video plays with YouTube captions in that language when YouTube offers them.',
+    'Choose "Subtitles off" in the same menu to hide them.',
+  ] },
+  { id: 'report', title: 'Report a person, seller, listing or video', steps: [
+    'Tap the Report button: on a community post (reports the person), in a seller\'s profile, on a listing (in the "Request to buy" window), or on a video.',
+    'Choose a reason, add details and tap Send report. Reports go only to admins, who review them by hand. Nothing is removed automatically.',
+    'You can talk and joke about anything in posts and comments. Only inappropriate pictures or videos (sexual content, assault, violence, hate), scams and spam should be reported.',
+  ] },
+  { id: 'reviews', title: 'Leave a review', steps: [
+    'In the Report window you can also give stars (1–5) and a comment. Reviews are public and show on the seller\'s profile or the listing.',
+    'Buyers whose purchase request was accepted can also review the seller from the Requests tab of the Marketplace.',
+    'One review per person for each seller, listing or person.',
+  ] },
+  { id: 'marketplace', title: 'Buy and sell parts', steps: [
+    'Open Marketplace. Tap a listing and "Request to buy" to message the seller; no payment is taken in the app.',
+    'To sell, open the Sell tab, create your seller profile and add listings. Companies can apply for a Verified badge, checked by hand.',
+    'Always check the listing and talk to the seller before paying; use a payment method with buyer protection.',
+  ] },
+  { id: 'donate', title: 'Support the app (optional donations)', steps: [
+    'Every feature is free. If you want to help with AI and hosting costs, open "Support the app" from the menu (or the Support link at the top on larger screens).',
+    'Pick $2, $5, $10 or type your own amount: PayPal opens in a new tab and the payment goes directly to the app owner. You can also choose any amount or currency on PayPal.',
+  ] },
+  { id: 'account', title: 'Account, progress and settings', steps: [
+    'Sign in with email or Google to save progress, scores, videos and guides to your account. Sessions end after about 5 hours for safety.',
+    'My progress shows your saved guides, completed repairs and exam scores. Settings has dark mode and offline options.',
+  ] },
+];
+
+/** Plain-text version for the AI Help Assistant. */
+export const HELP_TEXT = HELP_TOPICS.map((t) => `## ${t.title}\n${t.steps.map((s) => `- ${s}`).join('\n')}`).join('\n\n');

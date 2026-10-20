@@ -10,6 +10,9 @@ import BookDiagram, { TOPIC_DIAGRAMS } from './BookDiagram';
 import { recordScore } from '../../lib/theoryProgress';
 import { LevelPills } from './LevelPills';
 import { readBestScores } from '../../lib/theoryProgress';
+import { getBookLanguage, setBookLanguage, useDomTranslate } from '../../lib/translate';
+import LanguagePicker from '../LanguagePicker';
+import { Languages } from 'lucide-react';
 import { CheckCircle2, XCircle, RotateCcw, HelpCircle, ShieldAlert, Sparkles } from 'lucide-react';
 
 /**
@@ -156,7 +159,9 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
   const [topics, setTopics] = useState<TheoryTopic[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [current, setCurrent] = useState(0);
-  const [panel, setPanel] = useState<null | 'toc' | 'search' | 'glossary'>(null);
+  const [panel, setPanel] = useState<null | 'toc' | 'search' | 'glossary' | 'lang'>(null);
+  const [lang, setLang] = useState(() => getBookLanguage());
+  const rootRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState('');
   const [glossQuery, setGlossQuery] = useState('');
   const [mark, setMark] = useState<{ page: number; words: string[] } | null>(null);
@@ -169,6 +174,9 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
   useEffect(() => {
     loadTopicsInOrder().then(setTopics).catch(() => setLoadError(true));
   }, []);
+
+  // The book (pages, glossary, exams) is translated into the reader's language on demand.
+  const tr = useDomTranslate(rootRef, lang, [topics ? 1 : 0]);
 
   const pages = useMemo(() => (topics ? buildPages(topics) : []), [topics]);
   const pageIndexById = useMemo(() => new Map(pages.map((p, i) => [p.id, i])), [pages]);
@@ -208,7 +216,8 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
   /** Renders text with tappable glossary terms (first use per page) and search highlights. */
   const renderText = useCallback((text: string, pageIdx: number, used: Set<string>): ReactNode => {
     const words = mark && mark.page === pageIdx ? mark.words : [];
-    if (!termMatcher) return highlight(text, words);
+    // Translated book: keep sentences whole (no inline term buttons) so the AI translates them well.
+    if (!termMatcher || lang.code !== 'en') return lang.code !== 'en' ? text : highlight(text, words);
     const out: ReactNode[] = [];
     let last = 0;
     termMatcher.re.lastIndex = 0;
@@ -230,7 +239,7 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
     }
     out.push(<Fragment key={k++}>{highlight(text.slice(last), words)}</Fragment>);
     return out;
-  }, [termMatcher, mark]);
+  }, [termMatcher, mark, lang.code]);
 
   // ---- page turning ------------------------------------------------------------------------
   const applyTurnEffect = useCallback(() => {
@@ -621,12 +630,16 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
 
   // ---- shell -------------------------------------------------------------------------------
   return (
-    <div className="fixed inset-0 z-[70] flex flex-col bg-[#f6f3ec] dark:bg-slate-950 text-slate-900 dark:text-slate-100" role="dialog" aria-modal="true" aria-label="Electrical Theory book">
+    <div ref={rootRef} lang={lang.code} className="fixed inset-0 z-[70] flex flex-col bg-[#f6f3ec] dark:bg-slate-950 text-slate-900 dark:text-slate-100" role="dialog" aria-modal="true" aria-label="Electrical Theory book">
       {/* Top bar */}
       <div className="shrink-0 border-b border-slate-200/80 dark:border-slate-800 bg-[#f6f3ec]/95 dark:bg-slate-950/95 backdrop-blur" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
         <div className="h-12 px-2 sm:px-4 flex items-center gap-1">
           <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Close book"><X className="w-5 h-5" /></button>
           <p className="flex-1 min-w-0 truncate text-sm font-medium text-slate-600 dark:text-slate-300 px-1">{chapterTitle}</p>
+          {tr.busy && <Loader2 className="w-4 h-4 animate-spin text-cobalt-500 shrink-0" aria-label="Translating" />}
+          <button type="button" onClick={() => setPanel('lang')} className="px-2 py-1.5 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center gap-1 text-xs font-bold" aria-label={`Book language: ${lang.name}`} data-notranslate>
+            <Languages className="w-5 h-5" /><span className="uppercase">{lang.code.split('-')[0]}</span>
+          </button>
           <button type="button" onClick={() => setPanel('search')} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Find in book"><Search className="w-5 h-5" /></button>
           <button type="button" onClick={() => setPanel('glossary')} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Glossary"><BookA className="w-5 h-5" /></button>
           <button type="button" onClick={() => setPanel('toc')} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Table of contents"><List className="w-5 h-5" /></button>
@@ -647,7 +660,7 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
             <section key={p.id} className="w-full h-full shrink-0 snap-center snap-always relative" aria-label={`Page ${i + 1}`}>
               {Math.abs(i - current) <= RENDER_RADIUS ? (
                 <div ref={(n) => { if (n) pageRefs.current.set(i, n); else pageRefs.current.delete(i); }} className="book-page h-full overflow-y-auto overscroll-y-contain will-change-transform">
-                  <div className="max-w-[40rem] mx-auto px-5 sm:px-8">{renderPage(p, i)}</div>
+                  <div dir={lang.rtl ? 'rtl' : 'ltr'} className="max-w-[40rem] mx-auto px-5 sm:px-8">{renderPage(p, i)}</div>
                   <div className="book-shade pointer-events-none absolute inset-0" aria-hidden />
                 </div>
               ) : null}
@@ -672,9 +685,16 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
           <div className="flex-1 bg-black/40" />
           <div className="w-full max-w-md h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 flex flex-col shadow-2xl" onClick={(e) => e.stopPropagation()} style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
             <div className="h-12 shrink-0 px-3 flex items-center justify-between border-b border-slate-200 dark:border-slate-800">
-              <p className="font-semibold text-sm">{panel === 'toc' ? 'Contents' : panel === 'search' ? 'Find in book' : 'Glossary & index'}</p>
+              <p className="font-semibold text-sm">{panel === 'toc' ? 'Contents' : panel === 'search' ? 'Find in book' : panel === 'lang' ? 'Book language' : 'Glossary & index'}</p>
               <button type="button" onClick={() => setPanel(null)} className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Close panel"><X className="w-4 h-4" /></button>
             </div>
+            {panel === 'lang' && (
+              <div className="flex-1 min-h-0 flex flex-col" data-notranslate>
+                <p className="px-3 pt-3 text-xs text-slate-500">The book, glossary and chapter exams are translated by AI into the language you choose (it starts with your phone’s language). Translations are saved on this device, so pages you have read open instantly next time.</p>
+                {tr.error && <p className="px-3 pt-2 text-xs text-rose-600">{tr.error} <button type="button" className="underline" onClick={tr.retry}>Try again</button></p>}
+                <div className="flex-1 min-h-0"><LanguagePicker value={lang.code} onChange={(l) => { setLang(l); setBookLanguage(l.code); setPanel(null); }} /></div>
+              </div>
+            )}
             {panel === 'toc' && (
               <div className="flex-1 overflow-y-auto p-2">
                 {pages.map((x, xi) => {

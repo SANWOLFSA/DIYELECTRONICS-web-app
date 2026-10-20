@@ -627,6 +627,68 @@ service cloud.firestore {
     }
 
     // =================================================================
+    // Reports & community reviews (people, sellers, listings, videos, posts)
+    //   reports/{targetType}_{targetId}_{uid}      admin-only read; one per reporter per target
+    //   userReviews/{targetType}_{targetId}_{uid}  public read; one per reviewer per target
+    // Nothing is removed automatically: an admin reviews every report.
+    // =================================================================
+    function isReportTarget(t) {
+      return t in ['user', 'seller', 'listing', 'video', 'post'];
+    }
+
+    match /reports/{reportId} {
+      allow get: if isAdmin() || (isSignedIn() && resource.data.reporterUid == request.auth.uid);
+      allow list: if isAdmin();
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['targetType', 'targetId', 'targetLabel', 'reporterUid', 'reason', 'details', 'status', 'createdAt'])
+        && request.resource.data.reporterUid == request.auth.uid
+        && isReportTarget(request.resource.data.targetType)
+        && isNonEmptyString(request.resource.data.targetId, 200)
+        && request.resource.data.targetId != request.auth.uid
+        && request.resource.data.targetLabel is string && request.resource.data.targetLabel.size() <= 200
+        && isNonEmptyString(request.resource.data.reason, 100)
+        && request.resource.data.details is string && request.resource.data.details.size() <= 1000
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time
+        && reportId.matches('.*_' + request.auth.uid + '$');
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /userReviews/{reviewId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['targetType', 'targetId', 'reviewerUid', 'reviewerName', 'rating', 'comment', 'createdAt'])
+        && request.resource.data.reviewerUid == request.auth.uid
+        && isReportTarget(request.resource.data.targetType)
+        && isNonEmptyString(request.resource.data.targetId, 200)
+        && request.resource.data.targetId != request.auth.uid
+        && isNonEmptyString(request.resource.data.reviewerName, 80)
+        && request.resource.data.rating is int && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+        && request.resource.data.comment is string && request.resource.data.comment.size() <= 1000
+        && request.resource.data.createdAt == request.time
+        && reviewId.matches('.*_' + request.auth.uid + '$');
+      allow update: if false;
+      allow delete: if (isSignedIn() && resource.data.reviewerUid == request.auth.uid) || isAdmin();
+    }
+
+    // Translated subtitles (WebVTT) cached per video + language. Anyone can read; signed-in users
+    // can add a missing one (created by the app after the AI translation).
+    match /videoCaptions/{captionId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(['videoKey', 'lang', 'vtt', 'createdBy', 'createdAt'])
+        && request.resource.data.createdBy == request.auth.uid
+        && isNonEmptyString(request.resource.data.videoKey, 200)
+        && isNonEmptyString(request.resource.data.lang, 12)
+        && captionId == request.resource.data.videoKey + '_' + request.resource.data.lang
+        && request.resource.data.vtt is string && request.resource.data.vtt.size() > 6 && request.resource.data.vtt.size() <= 300000
+        && request.resource.data.vtt.matches('^WEBVTT[\\s\\S]*')
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if isAdmin();
+    }
+
+    // =================================================================
     // Real PCB boards (community board photos + schematic/boardview files)
     //   boards/{boardId}                 aggregate per normalized board number
     //   boards/{boardId}/photos/{id}     Storage boardPhotos/{uid}/{boardId}/...

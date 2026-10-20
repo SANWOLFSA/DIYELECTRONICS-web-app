@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, XCircle, ShieldAlert, CircuitBoard, ListOrdere
 import { RouteLink } from '../../hooks/usePathname';
 import { COMPONENT_BY_ID, METER_COMPONENTS, MODE_BY_ID } from '../../data/meter';
 import ComponentSymbol from './ComponentSymbol';
+import ProbeGuidePanel from './ProbeGuidePanel';
 
 function Box({ icon, title, children, tone = 'plain' }: { icon: ReactNode; title: string; children: ReactNode; tone?: 'plain' | 'good' | 'bad' | 'danger' }) {
   const tones = {
@@ -47,6 +48,8 @@ export default function ComponentDetail({ id }: { id: string }) {
           </div>
         </div>
       </header>
+
+      <ProbeGuidePanel c={c} />
 
       {c.safety.length > 0 && (
         <Box icon={<ShieldAlert className="w-4 h-4 text-red-500" />} title="Safety first" tone={c.danger ? 'danger' : 'bad'}>

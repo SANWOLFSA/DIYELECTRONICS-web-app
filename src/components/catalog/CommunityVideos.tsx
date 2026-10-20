@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { TranslatableVideo, YouTubeCaptionPicker, youtubeWithCaptions } from '../VideoTranslator';
+import { USER_CONTENT_NOTE, CONTENT_POLICY_POINTS } from '../../config/policy';
 import {
   AlertTriangle, CheckCircle, Film, Flag, Link2, Loader2, LogIn, Pencil, Play, Plus, ThumbsUp, Trash2, Upload, Video, X, ShieldOff,
 } from 'lucide-react';
@@ -138,6 +140,7 @@ export default function CommunityVideosSection({
 
 function VideoPlayer({ video }: { video: CommunityVideo }) {
   const [play, setPlay] = useState(false);
+  const [ytLang, setYtLang] = useState('');
   const boxRef = useRef<HTMLDivElement>(null);
   const [inView, setInView] = useState(false);
   useEffect(() => {
@@ -151,13 +154,15 @@ function VideoPlayer({ video }: { video: CommunityVideo }) {
 
   return (
     <div ref={boxRef} className="relative aspect-video w-full rounded-xl overflow-hidden bg-slate-950">
+      {video.kind === 'youtube' && <YouTubeCaptionPicker lang={ytLang} onChange={(c) => { setYtLang(c); setPlay(true); }} />}
       {video.kind === 'upload' ? (
         inView ? (
-          <video src={video.url} controls preload="metadata" playsInline className="w-full h-full object-contain bg-black" aria-label={video.title} />
+          <TranslatableVideo src={video.url} title={video.title} className="w-full h-full" />
         ) : <div className="w-full h-full" />
       ) : play ? (
         <iframe
-          src={`${video.url}${video.url.includes('?') ? '&' : '?'}autoplay=1`}
+          key={ytLang}
+          src={ytLang && video.kind === 'youtube' ? youtubeWithCaptions(`${video.url}${video.url.includes('?') ? '&' : '?'}autoplay=1`, ytLang) : `${video.url}${video.url.includes('?') ? '&' : '?'}autoplay=1`}
           title={video.title}
           className="w-full h-full"
           loading="lazy"
@@ -258,6 +263,7 @@ function VideoCard({ video: v, uid, canModerate, actor, solutionTitle, solutionH
         )}
       </div>
 
+      <p className="text-[10px] leading-snug text-slate-400">{USER_CONTENT_NOTE}</p>
       {editing && <EditVideoModal video={v} onClose={() => setEditing(false)} />}
       {confirmDelete && (
         <ConfirmDialog
@@ -318,7 +324,8 @@ function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }: {
   );
 }
 
-const REPORT_REASONS = ['Unsafe or dangerous advice', 'Wrong device or model', 'Spam or advertising', 'Offensive content', 'Other'];
+// Repair videos are never removed for the repair method; only inappropriate pictures/video (or spam) are reported.
+const REPORT_REASONS = ['Sexual or nude content', 'Violence, assault or gore', 'Hate or threats', 'Spam or advertising', 'Other'];
 
 function ReportDialog({ onCancel, onSubmit }: { onCancel: () => void; onSubmit: (reason: string) => Promise<void> }) {
   const [reason, setReason] = useState(REPORT_REASONS[0]);
@@ -493,6 +500,11 @@ function ShareVideoModal({ target, solutions, fixedSolution, owner, onClose }: {
       </label>
 
       <p className="text-[11px] text-slate-500">Only share videos you filmed or have the right to share. You can edit or delete it any time from the video or from My videos in Progress.</p>
+      <details className="text-[11px] text-slate-500 rounded-xl bg-slate-50 dark:bg-slate-800/60 p-2.5">
+        <summary className="font-semibold cursor-pointer">Content policy</summary>
+        <ul className="mt-1.5 list-disc pl-4 space-y-0.5">{CONTENT_POLICY_POINTS.map(p => <li key={p}>{p}</li>)}</ul>
+        <p className="mt-1.5">{USER_CONTENT_NOTE}</p>
+      </details>
       {err && <ErrorNote msg={err} />}
       {done && <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-400/10 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-2"><CheckCircle className="w-4 h-4" /> Shared! Thanks for helping other repairers.</div>}
 

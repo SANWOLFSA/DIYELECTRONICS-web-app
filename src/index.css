@@ -324,3 +324,10 @@ html:not(.dark) .ai-md th, html:not(.dark) .ai-md td { border-color: #d6d9e0; }
 .book-scroller { scroll-behavior: auto; -webkit-overflow-scrolling: touch; }
 .book-page { --shade: 0; }
 .book-shade { background: linear-gradient(90deg, rgb(0 0 0 / 0.35), transparent 30%, transparent 70%, rgb(0 0 0 / 0.35)); opacity: var(--shade); }
+
+/* Multimeter lab: probes slide onto the pins */
+@keyframes probe-in-left { from { transform: translate(-30px, 60px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes probe-in-right { from { transform: translate(30px, 60px); opacity: 0; } to { transform: none; opacity: 1; } }
+.probe-in-left { animation: probe-in-left 0.7s cubic-bezier(.2,.8,.2,1) both; }
+.probe-in-right { animation: probe-in-right 0.7s cubic-bezier(.2,.8,.2,1) 0.25s both; }
+@media (prefers-reduced-motion: reduce) { .probe-in-left, .probe-in-right { animation: none; } }
