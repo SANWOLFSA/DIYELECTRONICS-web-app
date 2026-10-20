@@ -2661,6 +2661,34 @@ function universalHandler(kind: 'device' | 'component') {
 app.get('/api/universal/device', universalHandler('device'));
 app.get('/api/universal/component', universalHandler('component'));
 
+
+// TEMPORARY diagnostic (remove before merge): reports Gemini reachability per model, never the key.
+app.get('/api/_diag/gemini', async (req, res) => {
+  if (req.query.t !== 'dx7f3q9k2') return res.status(404).end();
+  const key = getGeminiApiKey();
+  const red = (s: string) => String(s || '').split(key).join('[KEY]').slice(0, 400);
+  const out: any = { keyLen: key.length, keyPrefix: key.slice(0, 3) };
+  const timed = async (label: string, fn: (signal: AbortSignal) => Promise<Response>) => {
+    const t0 = Date.now();
+    try {
+      const r = await fn(AbortSignal.timeout(7000));
+      const txt = await r.text();
+      out[label] = { status: r.status, ms: Date.now() - t0, body: red(txt) };
+      if (label === 'listModels') { try { out[label].names = (JSON.parse(txt).models || []).map((m: any) => m.name).filter((n: string) => /gemini/.test(n)); out[label].body = undefined; } catch { /* not json */ } }
+    } catch (e: any) { out[label] = { error: red(e?.message || String(e)), ms: Date.now() - t0 }; }
+  };
+  const body = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Say OK' }] }] });
+  const models = String(req.query.models || 'gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-flash-latest,gemini-flash-lite-latest').split(',');
+  const jobs: Promise<void>[] = [];
+  jobs.push(timed('listModels', (signal) => fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key }, signal })));
+  for (const m of models) {
+    jobs.push(timed('gl:' + m, (signal) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body, signal })));
+    if (req.query.vertex) jobs.push(timed('vx:' + m, (signal) => fetch(`https://aiplatform.googleapis.com/v1/publishers/google/models/${m}:generateContent?key=${encodeURIComponent(key)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal })));
+  }
+  await Promise.all(jobs);
+  res.json(out);
+});
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
