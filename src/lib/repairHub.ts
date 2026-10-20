@@ -96,7 +96,7 @@ export function isHttpsUrl(v: string): boolean {
 }
 
 export const IMAGE_UPLOAD_UNAVAILABLE =
-  'Photo uploads need Firebase Cloud Storage, which is not enabled on this project yet. Paste an image link (https://…) instead, e.g. a Wikimedia Commons, Imgur or shared Google Photos link.';
+  'Photo uploads are not available on this build. Paste an image link (https://…) instead, e.g. a Wikimedia Commons, Imgur or shared Google Photos link.';
 
 export interface Owner {
   uid: string;
@@ -182,6 +182,8 @@ export interface HubGuide {
   parts: string[];
   steps: GuideStep[];
   coverUrl: string;
+  /** Optional teardown / guide video (Firebase Storage download URL or https link). */
+  videoUrl?: string;
   keywords: string[];
   status: GuideStatus;
   ownerUid: string;
@@ -203,6 +205,7 @@ export interface GuideInput {
   parts: string[];
   steps: GuideStep[];
   coverUrl: string;
+  videoUrl?: string;
 }
 
 const cleanList = (l: string[], max = LIMITS.listItems, len = LIMITS.itemLen) =>
@@ -212,6 +215,7 @@ export function validateGuide(g: GuideInput, publishing: boolean): string | null
   if (!g.title.trim()) return 'Give the guide a title.';
   if (!DEVICE_KEY_RE.test(g.device.key)) return 'Choose the device this guide is for.';
   if (g.coverUrl && !isHttpsUrl(g.coverUrl)) return 'The cover image must be an https:// link.';
+  if (g.videoUrl && !isHttpsUrl(g.videoUrl)) return 'The video must be an uploaded file or an https:// link.';
   for (const [i, s] of g.steps.entries()) {
     for (const u of s.imageUrls) if (u && !isHttpsUrl(u)) return `Step ${i + 1}: image links must start with https://`;
   }
@@ -219,6 +223,14 @@ export function validateGuide(g: GuideInput, publishing: boolean): string | null
     const real = g.steps.filter((s) => s.text.trim() || s.title.trim());
     if (real.length === 0) return 'Add at least one step before publishing.';
     if (!g.summary.trim()) return 'Write a short introduction before publishing.';
+    // Teardowns are photo-led: every step needs at least one photo.
+    if (g.kind === 'teardown') {
+      const missing = g.steps
+        .map((s, i) => ({ i, real: !!(s.text.trim() || s.title.trim()), photos: s.imageUrls.filter((u) => u && isHttpsUrl(u)).length }))
+        .filter((x) => x.real && x.photos === 0)
+        .map((x) => x.i + 1);
+      if (missing.length) return `Add at least one photo to step${missing.length > 1 ? 's' : ''} ${missing.join(', ')}. Every teardown step needs a photo.`;
+    }
   }
   if (!(g.minutes > 0 && g.minutes <= 10000)) return 'Time required must be between 1 and 10000 minutes.';
   return null;
@@ -247,6 +259,7 @@ function guideDoc(g: GuideInput, status: 'draft' | 'published') {
     parts: cleanList(g.parts),
     steps,
     coverUrl: isHttpsUrl(g.coverUrl) ? g.coverUrl.trim() : '',
+    videoUrl: g.videoUrl && isHttpsUrl(g.videoUrl) ? g.videoUrl.trim() : '',
     keywords: keywordsFor(g.title, g.device.label, g.kind, ...g.parts.slice(0, 10)),
     status,
   };

@@ -129,6 +129,17 @@ export default function GuideView({ onOpenAuth }: { onOpenAuth?: () => void }) {
         {guide.coverUrl ? <img src={guide.coverUrl} alt="" className="w-full aspect-[4/3] object-cover rounded-xl bg-slate-100" /> : null}
       </div>
 
+      {guide.videoUrl ? (
+        <section className={`${card} p-5 space-y-3`}>
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">{guide.kind === 'teardown' ? 'Teardown video' : 'Video'}</h2>
+          {/firebasestorage\.googleapis\.com|\.(mp4|webm|mov)(\?|$)/i.test(guide.videoUrl) ? (
+            <video src={guide.videoUrl} controls preload="metadata" playsInline className="w-full max-h-[70vh] rounded-xl bg-black" />
+          ) : (
+            <a href={guide.videoUrl} target="_blank" rel="noopener noreferrer" className="text-sm font-bold text-indigo-600 hover:underline break-all">Watch the video ↗</a>
+          )}
+        </section>
+      ) : null}
+
       {(guide.tools.length > 0 || guide.parts.length > 0) && (
         <div className="grid md:grid-cols-2 gap-4">
           {guide.parts.length > 0 && (

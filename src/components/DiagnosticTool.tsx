@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiFetch';
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Activity, Sparkles, ShieldAlert, Wrench, Copy, ArrowRight, Volume2, AlertTriangle } from 'lucide-react';
 import { useBenchSpeech, playBenchBeep, speakBenchText } from '../hooks/useBenchSpeech';
@@ -100,7 +101,7 @@ export default function DiagnosticTool({ onSourcePart }: { onSourcePart: (p: str
     setError(null);
     playBenchBeep('step');
     try {
-      const response = await fetch('/api/diagnose', {
+      const response = await aiFetch('/api/diagnose', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ category, model, symptom, powerStatus, visualSigns }),

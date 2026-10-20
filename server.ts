@@ -111,7 +111,43 @@ function withoutSearchNote(contents: any) {
     ? { ...c, parts: [...c.parts, { text: UNGROUNDED_NOTE }] } : c);
 }
 
-// Resilient multi-model Gemini caller with intelligent cascade
+// Resilient multi-model Gemini caller, built for Netlify's hard 30 s function limit.
+// Root cause of the Oct 2026 outage: the first model in the old cascade (gemini-3.8-flash) was
+// overloaded and its requests hung for 40 s+ (or returned 503 after ~13 s), and the SDK call had
+// no timeout, so every AI route was killed by Netlify before the cascade reached a working model.
+// Now: thinking is kept LOW (default "high" thinking alone took 6-35 s), every call is abortable,
+// the whole cascade has a time budget, and a second model is started in parallel ("hedged")
+// if the first has not answered after a few seconds. The first good answer wins.
+// Model ids verified against GET /v1beta/models on 2026-10-20; override with GEMINI_MODELS (comma list).
+// Free-tier capacity differs per model and changes minute to minute (2026-10-20 probes: one model
+// answered in 2-5 s while others hung 20-45 s or returned 503), so several are raced at once.
+const DEFAULT_GEMINI_MODELS = ['gemini-3-flash-preview', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite-preview', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+const GEMINI_MODELS = (process.env.GEMINI_MODELS || '').split(',').map((m) => m.trim()).filter(Boolean);
+const GEMINI_BUDGET_MS = Number(process.env.GEMINI_BUDGET_MS) || 22000;
+const GEMINI_HEDGE_MS = 4000;
+const GEMINI_PARALLEL_START = 3;
+/** Per-instance model health: recently failing / slow models are tried later. */
+const modelHealth = new Map<string, { failUntil: number; lastMs: number }>();
+function orderModels(models: string[]) {
+  const now = Date.now();
+  return models
+    .map((m, i) => ({ m, i, h: modelHealth.get(m) }))
+    .sort((a, b) => {
+      const af = a.h && a.h.failUntil > now ? 1 : 0, bf = b.h && b.h.failUntil > now ? 1 : 0;
+      if (af !== bf) return af - bf;
+      return (a.h?.lastMs ?? 8000 + a.i) - (b.h?.lastMs ?? 8000 + b.i);
+    })
+    .map((x) => x.m);
+}
+
+/** One client factory so every route gets the same options (GEMINI_BASE_URL is only for local testing). */
+function makeGenAI(apiKey: string) {
+  const baseUrl = process.env.GEMINI_BASE_URL;
+  return new GoogleGenAI(baseUrl ? { apiKey, httpOptions: { baseUrl } } : { apiKey });
+}
+
+const isBusyError = (msg: string) => /429|503|quota|high demand|RESOURCE_EXHAUSTED|UNAVAILABLE|overloaded|timed out|aborted/i.test(msg);
+
 async function callGeminiWithCascade(
   ai: GoogleGenAI,
   contents: any,
@@ -120,59 +156,95 @@ async function callGeminiWithCascade(
   extraConfig?: Record<string, any>,
   onResponse?: (response: any) => void
 ): Promise<string> {
-  // Ordered cascade: gemini-3.8-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite (ids per ai.google.dev/gemini-api/docs/models, Oct 2026)
-  // (gemini-3.1-flash-lite is scheduled for shutdown on 2027-05-07: https://ai.google.dev/gemini-api/docs/deprecations)
-  // Lookups that lost grounding use the fast lite models first so they finish inside Netlify's 30s limit.
-  const fast = !!extraConfig?.__fast;
-  if (fast) { extraConfig = { ...extraConfig }; delete extraConfig.__fast; if (!Object.keys(extraConfig).length) extraConfig = undefined; }
-  const models = fast
-    ? ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.8-flash']
-    : ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-  let lastError: any = null;
-
-  // If grounding quota was recently exhausted, skip the grounded attempt entirely (fast answers on free tier).
-  if (tools && Date.now() < groundingBlockedUntil) {
-    return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __fast: true }, onResponse);
+  const budgetMs = Number(extraConfig?.__budgetMs) || GEMINI_BUDGET_MS;
+  if (extraConfig) {
+    extraConfig = { ...extraConfig };
+    delete extraConfig.__fast; delete extraConfig.__budgetMs;
+    if (!Object.keys(extraConfig).length) extraConfig = undefined;
   }
 
-  for (const model of models) {
+  // Grounding (Google Search) needs a billed project; on the free tier it is a fast 429, so skip it.
+  if (tools && Date.now() < groundingBlockedUntil) {
+    return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __budgetMs: budgetMs }, onResponse);
+  }
+
+  const models = orderModels(GEMINI_MODELS.length ? GEMINI_MODELS : DEFAULT_GEMINI_MODELS);
+  const startedAt = Date.now();
+  const controllers: AbortController[] = [];
+  const errors: string[] = [];
+  let lastError: any = null;
+  let sawQuotaOnTools = false;
+  let settled = false;
+
+  const attempt = async (model: string): Promise<{ text: string; response: any }> => {
+    const ctrl = new AbortController();
+    controllers.push(ctrl);
+    const remaining = budgetMs - (Date.now() - startedAt);
+    const timer = setTimeout(() => ctrl.abort(), Math.max(1000, remaining));
+    const t0 = Date.now();
     try {
-      const config: any = {};
+      const config: any = { thinkingConfig: { thinkingLevel: 'LOW' }, abortSignal: ctrl.signal };
       if (systemInstruction) config.systemInstruction = systemInstruction;
       if (tools) config.tools = tools;
       if (extraConfig) Object.assign(config, extraConfig);
-      
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config: Object.keys(config).length > 0 ? config : undefined
-      });
-      if (response?.text) {
-        onResponse?.(response);
-        return response.text;
-      }
+      const response: any = await ai.models.generateContent({ model, contents, config });
+      const text = response?.text;
+      if (!text) throw new Error(`${model} returned an empty answer`);
+      modelHealth.set(model, { failUntil: 0, lastMs: Date.now() - t0 });
+      return { text, response };
     } catch (err: any) {
-      lastError = err;
-      const errMsg = err?.message || String(err);
-      const isExpectedSpike = errMsg.includes("429") || errMsg.includes("503") || errMsg.includes("quota") || errMsg.includes("high demand") || errMsg.includes("RESOURCE_EXHAUSTED") || errMsg.includes("UNAVAILABLE");
-      if (isExpectedSpike) {
-        console.warn(`Gemini model ${model} temporarily limited/busy (${err?.status || 'quota'}), checking next model in cascade...`);
-      } else {
-        console.warn(`Gemini model ${model} notice: ${errMsg.slice(0, 120)}`);
-      }
+      const msg = ctrl.signal.aborted ? `${model} timed out` : String(err?.message || err);
+      if (tools && /429|RESOURCE_EXHAUSTED|quota/i.test(msg)) sawQuotaOnTools = true;
+      lastError = err; errors.push(`${model}: ${msg.slice(0, 140)}`);
+      // Aborts caused by another model winning are not failures.
+      if (!(ctrl.signal.aborted && settled)) modelHealth.set(model, { failUntil: Date.now() + 2 * 60 * 1000, lastMs: Date.now() - t0 });
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-  }
+  };
 
-  // Free-tier projects often have no quota for grounding tools (Google Search/Maps).
-  // If every grounded attempt was rate-limited, retry once without tools so users still get an answer.
-  const lastMsg = String(lastError?.message || lastError || '');
-  if (tools && (lastMsg.includes('429') || lastMsg.includes('RESOURCE_EXHAUSTED') || lastMsg.includes('quota'))) {
-    console.warn('Grounded Gemini calls were rate-limited; retrying without tools for the next 15 minutes.');
+  // Hedged race: start model i; start model i+1 when model i fails OR after GEMINI_HEDGE_MS.
+  const result = await new Promise<{ text: string; response: any } | null>((resolve) => {
+    let next = 0, running = 0, done = false;
+    let hedgeTimer: any = null;
+    const finish = (v: { text: string; response: any } | null) => {
+      if (done) return;
+      done = true; settled = true; clearTimeout(hedgeTimer); clearTimeout(overall);
+      for (const c of controllers) { try { c.abort(); } catch { /* ignore */ } }
+      resolve(v);
+    };
+    const overall = setTimeout(() => finish(null), budgetMs + 500);
+    const launch = () => {
+      if (done) return;
+      clearTimeout(hedgeTimer);
+      if (next >= models.length || budgetMs - (Date.now() - startedAt) < 1500) {
+        if (running === 0) finish(null);
+        return;
+      }
+      const model = models[next++];
+      running++;
+      attempt(model).then(finish, () => { running--; launch(); });
+      hedgeTimer = setTimeout(launch, GEMINI_HEDGE_MS);
+    };
+    for (let i = 0; i < GEMINI_PARALLEL_START; i++) launch();
+  });
+
+  if (result) {
+    onResponse?.(result.response);
+    return result.text;
+  }
+  if (errors.length) console.warn('Gemini cascade failed:', errors.join(' | '));
+
+  // Free-tier projects have no quota for grounding tools: answer from model knowledge instead.
+  if (tools && sawQuotaOnTools) {
+    console.warn('Grounded Gemini calls were rate-limited; answering without tools for the next 15 minutes.');
     groundingBlockedUntil = Date.now() + 15 * 60 * 1000;
-    return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __fast: true }, onResponse);
+    const left = budgetMs - (Date.now() - startedAt);
+    if (left > 5000) return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __budgetMs: left }, onResponse);
   }
-
-  throw lastError || new Error("All candidate Gemini models were unavailable.");
+  const busy = errors.length === 0 || errors.every((e) => isBusyError(e));
+  throw lastError && !busy ? lastError : new Error(`All candidate Gemini models were unavailable (${errors.join(' | ') || 'timed out'}).`);
 }
 
 // ---- Shared AI route helpers --------------------------------------------------
@@ -233,7 +305,7 @@ app.post("/api/chat", async (req, res) => {
   const contents = [...safeHistory, { role: 'user', parts: [{ text: message.trim() }] }];
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
     const reply = await callGeminiWithCascade(ai, contents, instruction, undefined);
     if (!reply) return res.status(503).json({ error: AI_UNAVAILABLE });
     res.json({ reply, source: 'gemini' });
@@ -279,7 +351,7 @@ Return ONLY a JSON array (no markdown fences, no commentary). Each element must 
 {"type":"numeric","topicId":"...","difficulty":1-3,"prompt":"...","answer":12.5,"unit":"V","tolerance":0.02,"solution":"short worked solution with the calculation"}`;
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
     const text = await callGeminiWithCascade(ai, [{ role: "user", parts: [{ text: prompt }] }],
       "You are a meticulous electrical engineering examiner. You output strictly valid JSON only.");
     const cleaned = (text || "").replace(/```(?:json)?/gi, "").trim();
@@ -329,7 +401,7 @@ app.post("/api/component-diagnostics", async (req, res) => {
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
 
     const prompt = `You are an experienced micro-soldering hardware engineer and circuit diagnostics expert.
 Analyze this component on the motherboard:
@@ -378,7 +450,7 @@ app.post("/api/gemini-grounded", requireFirebaseUser, async (req, res) => {
   try {
     const apiKey = getGeminiApiKey();
     if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED });
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
     
     const tools = useMaps ? [{ googleMaps: {} }] : [{ googleSearch: {} }];
     
@@ -399,7 +471,7 @@ app.post("/api/transcribe-audio", requireFirebaseUser, async (req, res) => {
   try {
     const apiKey = getGeminiApiKey();
     if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED });
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
     
     const response = await ai.models.generateContent({
         model: "gemini-3.5-transcribe",
@@ -435,7 +507,7 @@ app.post("/api/generate-video", (req, res, next) => {
     try {
         const apiKey = getGeminiApiKey();
         if (!apiKey) return res.status(503).json({ error: AI_NOT_CONFIGURED });
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = makeGenAI(apiKey);
         
         const operation = await ai.models.generateVideos({
             model: 'veo-3.1-fast-generate-preview',
@@ -459,7 +531,7 @@ app.post("/api/device-search", async (req, res) => {
   try {
     const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
     if (!apiKey) throw new Error("No API key");
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = makeGenAI(apiKey);
     
     // Note: In a real app, this would query a backend DB, but here we just use AI to generate missing info
     const prompt = `Provide detailed device information (category, brand, model, size) for: "${query}". 
@@ -529,29 +601,10 @@ Provide a structured table of critical ICs:
 
     if (apiKey) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
-        // Attempt Google Search Grounding if permitted by key, else cascade smoothly
-        try {
-          const searchResponse = await ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite',
-            contents: prompt,
-            config: {
-              systemInstruction,
-              tools: [{ googleSearch: {} }]
-            }
-          });
-          if (searchResponse?.text) {
-            blueprintResult = searchResponse.text;
-          }
-        } catch {
-          // Fall back to standard cascade without search tool if tool is restricted/quota-limited
-          blueprintResult = await callGeminiWithCascade(
-            ai,
-            [{ role: 'user', parts: [{ text: prompt }] }],
-            systemInstruction,
-            undefined
-          );
-        }
+        const ai = makeGenAI(apiKey);
+        // Grounded when the project allows it; the cascade itself falls back to an ungrounded answer.
+        const text = await callGeminiWithCascade(ai, [{ role: 'user', parts: [{ text: prompt }] }], systemInstruction, [{ googleSearch: {} }]);
+        if (text) blueprintResult = text;
       } catch {
         console.warn("Cloud models unavailable for blueprint search, generating synthesized blueprint telemetry...");
         blueprintResult = synthesizeBlueprintTelemetry(searchQuery);
@@ -586,7 +639,7 @@ app.post("/api/generate-boardview", async (req, res) => {
 
     if (apiKey) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = makeGenAI(apiKey);
         const jsonPrompt = `Generate a realistic, accurate PCB Boardview layout JSON object for this device:
 Device / Board Query: "${searchQuery}" ${specificModule ? `(Target Module: ${specificModule})` : ''}
 
@@ -2315,7 +2368,87 @@ function parseJsonLoose(text: string): any {
 const strArr = (v: any, max: number, len = 160) =>
   (Array.isArray(v) ? v : []).filter((x) => typeof x === 'string' && x.trim()).slice(0, max).map((x: string) => x.trim().slice(0, len));
 
-async function fetchBoardInfoGrounded(ai: GoogleGenAI, display: string): Promise<any> {
+
+// ---- Free online search for boards (no API key needed) ------------------------------------
+// iFixit's public search API (guides, device wikis, part listings, Answers threads with photos)
+// plus Wikipedia full-text search. Used so a board search always returns real web results,
+// even when Gemini Google-Search grounding is not available on the free tier.
+const boardWebCache = new Map<string, { at: number; results: any[] }>();
+const WEB_UA = 'DIYElectronicsApp/1.0 (board search; diy.electronicsa@gmail.com)';
+const IFIXIT_KINDS: Record<string, string> = { guide: 'Repair guide', wiki: 'Device / part wiki', question: 'Q&A thread', product: 'Part listing', item: 'Part', topic: 'Topic', category: 'Device', teardown: 'Teardown' };
+
+async function ifixitSearch(q: string, limit = 10): Promise<any[]> {
+  const r = await fetch(`https://www.ifixit.com/api/2.0/search/${encodeURIComponent(q)}?limit=${limit}`, {
+    headers: { 'User-Agent': WEB_UA, Accept: 'application/json' }, signal: AbortSignal.timeout(7000),
+  });
+  if (!r.ok) throw new Error(`ifixit ${r.status}`);
+  const j: any = await r.json();
+  return (Array.isArray(j?.results) ? j.results : [])
+    .filter((x: any) => typeof x?.url === 'string' && /^https:\/\/(www\.)?ifixit\.com\//.test(x.url) && x.title)
+    .map((x: any) => ({
+      title: String(x.display_title || x.title).slice(0, 160),
+      url: String(x.url).slice(0, 500),
+      snippet: stripHtml(String(x.summary || x.text || x.description || '')).slice(0, 240),
+      image: typeof x.image?.standard === 'string' ? x.image.standard : (typeof x.image?.thumbnail === 'string' ? x.image.thumbnail : null),
+      kind: IFIXIT_KINDS[String(x.dataType)] || 'iFixit',
+      source: 'iFixit',
+    }));
+}
+
+async function wikipediaSearch(q: string, limit = 4): Promise<any[]> {
+  const params = new URLSearchParams({ action: 'query', list: 'search', srsearch: q, srlimit: String(limit), format: 'json', formatversion: '2', origin: '*' });
+  const r = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, { headers: { 'User-Agent': WEB_UA, Accept: 'application/json' }, signal: AbortSignal.timeout(6000) });
+  if (!r.ok) throw new Error(`wikipedia ${r.status}`);
+  const j: any = await r.json();
+  return (j?.query?.search || []).map((x: any) => ({
+    title: String(x.title).slice(0, 160),
+    url: `https://en.wikipedia.org/wiki/${encodeURIComponent(String(x.title).replace(/ /g, '_'))}`,
+    snippet: stripHtml(String(x.snippet || '')).slice(0, 240),
+    image: null,
+    kind: 'Encyclopedia',
+    source: 'Wikipedia',
+  }));
+}
+
+/** Query variants: as typed, without generic words ("board", "TV"), and the brand + model prefix. */
+function boardQueryVariants(display: string): string[] {
+  const words = display.split(/\s+/).filter(Boolean);
+  const core = words.filter((w) => !BOARD_GENERIC_WORDS.has(w.toLowerCase()) && !/^(tv|television|console|phone|laptop|smart)$/i.test(w));
+  const out = [display, core.join(' ')];
+  // "UA43TU7000" style model numbers: also try the series prefix ("UA43").
+  const m = core.find((w) => /^[A-Za-z]{1,4}\d{2,}[A-Za-z0-9-]*$/.test(w));
+  if (m && core.length) out.push(core.filter((w) => w !== m).concat(m.replace(/^([A-Za-z]{1,4}\d{2}).*$/, '$1')).join(' '));
+  if (core.length && !/board/i.test(display)) out.push(`${core.join(' ')} board`);
+  return [...new Set(out.map((x) => x.trim()).filter((x) => x.length >= 2))];
+}
+
+async function searchBoardWeb(display: string): Promise<any[]> {
+  const variants = boardQueryVariants(display);
+  const seen = new Set<string>();
+  const results: any[] = [];
+  const add = (list: any[]) => { for (const x of list) { if (!seen.has(x.url)) { seen.add(x.url); results.push(x); } } };
+  const settled = await Promise.allSettled([
+    ...variants.slice(0, 3).map((v) => ifixitSearch(v, 10)),
+    wikipediaSearch(variants[1] || display, 3),
+  ]);
+  for (const r of settled.slice(0, -1)) if (r.status === 'fulfilled') add(r.value);
+  // Prefer results that mention the query words, then guides/wikis, then threads.
+  const tokens = (variants[1] || display).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1);
+  const score = (x: any) => {
+    const hay = `${x.title} ${x.snippet}`.toLowerCase();
+    const hits = tokens.filter((t) => hay.includes(t)).length;
+    const kindBonus = /guide|wiki|part/i.test(x.kind) ? 0.5 : 0;
+    return hits + kindBonus + (/board|motherboard|pcb/i.test(hay) ? 0.5 : 0);
+  };
+  results.sort((a, b) => score(b) - score(a));
+  const wiki = settled[settled.length - 1];
+  const out = results.filter((x) => score(x) >= 1).slice(0, 12);
+  // Wikipedia full-text search is loose: keep an article only if its TITLE contains a query word.
+  if (wiki.status === 'fulfilled') out.push(...wiki.value.filter((w: any) => !seen.has(w.url) && tokens.some((t) => t.length > 2 && w.title.toLowerCase().includes(t))).slice(0, 3));
+  return out;
+}
+
+async function fetchBoardInfoGrounded(ai: GoogleGenAI, display: string, web: any[] = []): Promise<any> {
   const prompt = `You are a cautious electronics repair researcher. Use Google Search to look up the printed circuit board / part number "${display}".
 Return ONLY a JSON object (no prose) with exactly these keys:
 {
@@ -2328,13 +2461,21 @@ Return ONLY a JSON object (no prose) with exactly these keys:
  "commonFaults": string[],
  "notes": string[]                 // short practical notes (alternative numbers, revisions, compatibility)
 }
-Rules: Only include facts supported by the search results. Never guess or invent part numbers, ICs or faults. If something is not found, use null or an empty array. If the board cannot be identified, set "found": false and leave the arrays empty.`;
+Rules: Only include facts supported by the search results. Never guess or invent part numbers, ICs or faults. If something is not found, use null or an empty array. If the board cannot be identified, set "found": false and leave the arrays empty.
+If the query is a device model or model series (e.g. "Samsung UA43", "PS4") rather than a printed board number, describe the main board used in that device or series: set "found": true, put the device/series in "devices", and list known main-board numbers in "notes".${web.length ? `
+
+Web results already found for this query (free online search). Use them as evidence and add a key "usedResults": number[] listing the [n] numbers you relied on:
+${web.slice(0, 12).map((w, i) => `[${i + 1}] ${w.title} (${w.source}, ${w.kind}) ${w.url}\n    ${w.snippet}`).join('\n')}` : ''}`;
   let grounding: any = null;
   const text = await callGeminiWithCascade(ai, [{ role: 'user', parts: [{ text: prompt }] }], undefined, [{ googleSearch: {} }], undefined,
     (r) => { grounding = r?.candidates?.[0]?.groundingMetadata || null; });
   const parsed = parseJsonLoose(text) || {};
   const seen = new Set<string>();
   const sources: { title: string; url: string }[] = [];
+  for (const n of Array.isArray(parsed.usedResults) ? parsed.usedResults : []) {
+    const w = web[Number(n) - 1];
+    if (w && !seen.has(w.url)) { seen.add(w.url); sources.push({ title: w.title, url: w.url }); }
+  }
   for (const c of grounding?.groundingChunks || []) {
     const url = c?.web?.uri;
     if (typeof url !== 'string' || !/^https?:\/\//.test(url) || seen.has(url)) continue;
@@ -2366,7 +2507,7 @@ app.get('/api/boards/search', async (req, res) => {
   const display = String(req.query.q || '').replace(/\s+/g, ' ').trim().slice(0, 80);
   const normalized = normalizeBoardQuery(display);
   if (!normalized || normalized.length < 2) return res.status(400).json({ error: 'Enter a board or part number (at least 2 characters).' });
-  const include = new Set(String(req.query.include || 'photos,links,info').split(',').map((s) => s.trim()));
+  const include = new Set(String(req.query.include || 'photos,links,web,info').split(',').map((s) => s.trim()));
   const wantsInfo = include.has('info');
   const rate = boardRateCheck(req, wantsInfo && !boardInfoCache.has(normalized));
   if (!rate.ok) {
@@ -2394,6 +2535,23 @@ app.get('/api/boards/search', async (req, res) => {
     })());
   }
 
+  // Free online search (iFixit + Wikipedia). Shared by the "web" results and as evidence for the AI info.
+  let webPromise: Promise<any[]> | null = null;
+  const getWeb = () => (webPromise ||= (async () => {
+    const hit = boardWebCache.get(normalized);
+    if (hit && now - hit.at < BOARD_CACHE_TTL_MS) return hit.results;
+    try {
+      const results = await searchBoardWeb(display);
+      if (boardWebCache.size > 3000) boardWebCache.clear();
+      if (results.length) boardWebCache.set(normalized, { at: now, results });
+      return results;
+    } catch (e: any) {
+      console.warn('board web search failed:', e?.message || e);
+      return [];
+    }
+  })());
+  if (include.has('web')) tasks.push(getWeb().then((r) => { body.web = r; }));
+
   let infoStatus = 200;
   if (wantsInfo) {
     tasks.push((async () => {
@@ -2403,7 +2561,7 @@ app.get('/api/boards/search', async (req, res) => {
       if (!ai) { body.info = null; body.infoError = AI_NOT_CONFIGURED; infoStatus = 503; return; }
       if (!rate.infoAllowed) { body.info = null; body.infoError = 'Board lookups are rate-limited. Try again in a few minutes.'; infoStatus = 429; return; }
       try {
-        const info = await fetchBoardInfoGrounded(ai, display);
+        const info = await fetchBoardInfoGrounded(ai, display, await getWeb());
         if (boardInfoCache.size > 2000) boardInfoCache.clear();
         boardInfoCache.set(normalized, { at: now, info });
         body.info = info;
@@ -2662,33 +2820,6 @@ app.get('/api/universal/device', universalHandler('device'));
 app.get('/api/universal/component', universalHandler('component'));
 
 
-// TEMPORARY diagnostic (remove before merge): reports Gemini reachability per model, never the key.
-app.get('/api/_diag/gemini', async (req, res) => {
-  if (req.query.t !== 'dx7f3q9k2') return res.status(404).end();
-  const key = getGeminiApiKey();
-  const red = (s: string) => String(s || '').split(key).join('[KEY]').slice(0, 400);
-  const out: any = { keyLen: key.length, keyPrefix: key.slice(0, 3) };
-  const timed = async (label: string, fn: (signal: AbortSignal) => Promise<Response>) => {
-    const t0 = Date.now();
-    try {
-      const r = await fn(AbortSignal.timeout(7000));
-      const txt = await r.text();
-      out[label] = { status: r.status, ms: Date.now() - t0, body: red(txt) };
-      if (label === 'listModels') { try { out[label].names = (JSON.parse(txt).models || []).map((m: any) => m.name).filter((n: string) => /gemini/.test(n)); out[label].body = undefined; } catch { /* not json */ } }
-    } catch (e: any) { out[label] = { error: red(e?.message || String(e)), ms: Date.now() - t0 }; }
-  };
-  const body = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Say OK' }] }] });
-  const models = String(req.query.models || 'gemini-3.8-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash,gemini-2.5-flash-lite,gemini-flash-latest,gemini-flash-lite-latest').split(',');
-  const jobs: Promise<void>[] = [];
-  jobs.push(timed('listModels', (signal) => fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': key }, signal })));
-  for (const m of models) {
-    jobs.push(timed('gl:' + m, (signal) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body, signal })));
-    if (req.query.vertex) jobs.push(timed('vx:' + m, (signal) => fetch(`https://aiplatform.googleapis.com/v1/publishers/google/models/${m}:generateContent?key=${encodeURIComponent(key)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal })));
-  }
-  await Promise.all(jobs);
-  res.json(out);
-});
-
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
@@ -2698,7 +2829,7 @@ app.get("/api/health", (req, res) => {
 const getGeminiClient = () => {
   const apiKey = getGeminiApiKey();
   if (!apiKey) return null;
-  return new GoogleGenAI({ apiKey });
+  return makeGenAI(apiKey);
 };
 
 const CURATED_MISTAKES_BY_MODEL: Record<string, any> = {

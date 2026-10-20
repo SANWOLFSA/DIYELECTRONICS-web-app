@@ -766,6 +766,10 @@ service cloud.firestore {
         return ['title', 'summary', 'kind', 'deviceKey', 'deviceLabel', 'devicePath', 'difficulty', 'minutes',
                 'tools', 'parts', 'steps', 'coverUrl', 'keywords', 'status', 'updatedAt'];
       }
+      // Optional fields: allowed on create/update but not required (older guides do not have them).
+      function guideOptionalKeys() {
+        return ['videoUrl'];
+      }
 
       function validGuide(d) {
         return isNonEmptyString(d.title, 140)
@@ -781,6 +785,7 @@ service cloud.firestore {
           && d.steps is list && d.steps.size() <= 80
           && (d.status == 'draft' || d.steps.size() > 0)
           && (d.coverUrl == '' || isHttpsLink(d.coverUrl))
+          && (!('videoUrl' in d) || d.videoUrl == '' || isHttpsLink(d.videoUrl))
           && d.keywords is list && d.keywords.size() <= 40
           && d.status in ['draft', 'published'];
       }
@@ -804,7 +809,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
         && request.resource.data.ownerUid == request.auth.uid
-        && request.resource.data.keys().hasOnly(guideContentKeys().concat(['ownerUid', 'ownerName', 'completedCount', 'createdAt']))
+        && request.resource.data.keys().hasOnly(guideContentKeys().concat(guideOptionalKeys()).concat(['ownerUid', 'ownerName', 'completedCount', 'createdAt']))
         && request.resource.data.keys().hasAll(guideContentKeys().concat(['ownerUid', 'ownerName', 'completedCount', 'createdAt']))
         && isNonEmptyString(request.resource.data.ownerName, 80)
         && request.resource.data.completedCount == 0
@@ -816,7 +821,7 @@ service cloud.firestore {
         // Owner edits content / publishes / unpublishes (never counters, owner or a removed guide).
         (isSignedIn() && resource.data.ownerUid == request.auth.uid
           && resource.data.status != 'removed'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(guideContentKeys())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(guideContentKeys().concat(guideOptionalKeys()))
           && request.resource.data.updatedAt == request.time
           && validGuide(request.resource.data))
         || (isAdmin() && isModerationOnly() && request.resource.data.status in ['draft', 'published', 'removed'])

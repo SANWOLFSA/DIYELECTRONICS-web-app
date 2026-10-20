@@ -106,10 +106,20 @@ export interface ReferenceLink {
   kind: string;
 }
 
+export interface WebResult {
+  title: string;
+  url: string;
+  snippet: string;
+  image: string | null;
+  kind: string;
+  source: string;
+}
+
 export interface BoardSearchResponse {
   query: string;
   normalized: string;
   links: ReferenceLink[];
+  web?: WebResult[];
   photos?: CommonsPhoto[];
   photosError?: string;
   info?: BoardInfo | null;

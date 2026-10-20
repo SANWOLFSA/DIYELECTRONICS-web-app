@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiFetch';
 import React, { useState } from 'react';
 import { db } from '../lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
@@ -77,7 +78,7 @@ export default function PhonesPage({ themeConfig, onNavigateTo3D }: { themeConfi
 Brand/Model: ${selectedBrand}
 Issue: ${issueToSearch}`;
 
-        const res = await fetch('/api/chat', {
+        const res = await aiFetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: prompt, mode: 'phone-repair' })

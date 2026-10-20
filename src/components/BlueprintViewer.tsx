@@ -10,6 +10,7 @@ import {
   ExternalLink,
   FileText,
   Flame,
+  Globe2,
   Image as ImageIcon,
   Link2,
   Loader2,
@@ -272,7 +273,7 @@ function BoardResultPage({ display, base, currentUser, onOpenAuth }: { display: 
     let live = true;
     const q = searchText;
     setPhotosLoading(true); setInfoLoading(true); setPhotosErr(null); setInfoErr(null); setInfo(null);
-    searchBoardsApi(q, 'photos,links')
+    searchBoardsApi(q, 'photos,links,web')
       .then((r) => { if (live) { setPhotosResp(r); setPhotosErr(r.photosError || null); } })
       .catch((e) => { if (live) setPhotosErr(e.message); })
       .finally(() => { if (live) setPhotosLoading(false); });
@@ -297,6 +298,7 @@ function BoardResultPage({ display, base, currentUser, onOpenAuth }: { display: 
 
   const commonsPhotos = photosResp?.photos || [];
   const links = photosResp?.links || [];
+  const webResults = photosResp?.web || [];
 
   const lightboxItems: LightboxItem[] = useMemo(() => {
     const comm = community
@@ -446,6 +448,33 @@ function BoardResultPage({ display, base, currentUser, onOpenAuth }: { display: 
             <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">Got this board on your bench? Upload a clear photo with the number visible. Check the image search below for photos elsewhere on the web.</p>
             <button onClick={openUpload} className={`${primaryBtn} mt-3 px-4 py-2 rounded-xl text-xs font-bold inline-flex items-center gap-1.5`}><Camera className="w-3.5 h-3.5" /> Upload a photo of this board</button>
           </div>
+        )}
+      </section>
+
+
+      {/* Online results (iFixit guides, part wikis, Q&A + Wikipedia), always available without AI */}
+      <section className={`${card} p-5`}>
+        <h2 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2 mb-1"><Search className="w-4 h-4 text-indigo-500" /> Online results</h2>
+        <p className="text-[11px] text-slate-500 mb-3">Repair guides, board listings and Q&amp;A threads found on the web for this search.</p>
+        {photosLoading ? (
+          <p className="text-xs text-slate-500 flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching online…</p>
+        ) : webResults.length ? (
+          <ul className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {webResults.map((w) => (
+              <li key={w.url}>
+                <a href={w.url} target="_blank" rel="noopener noreferrer" className="flex gap-3 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-indigo-400 hover:bg-indigo-50/50 dark:hover:bg-indigo-950/30 h-full">
+                  {w.image ? <img src={w.image} alt="" loading="lazy" className="w-16 h-12 rounded-lg object-cover shrink-0 bg-slate-100 dark:bg-slate-800" /> : <span className="w-16 h-12 rounded-lg shrink-0 bg-slate-100 dark:bg-slate-800 flex items-center justify-center"><Globe2 className="w-4 h-4 text-slate-400" /></span>}
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-xs font-bold text-slate-900 dark:text-white line-clamp-2">{w.title}</span>
+                    <span className="block text-[10px] font-semibold text-indigo-600 dark:text-indigo-400">{w.source} · {w.kind}</span>
+                    {w.snippet && <span className="block text-[11px] text-slate-500 line-clamp-2">{w.snippet}</span>}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs text-slate-500">No direct matches online yet. Try the schematic and image searches below, or a shorter number.</p>
         )}
       </section>
 

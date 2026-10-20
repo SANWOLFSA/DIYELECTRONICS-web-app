@@ -1,3 +1,4 @@
+import { aiFetch } from '../../lib/aiFetch';
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import { ArrowLeft, Bot, Lightbulb, Sigma, AlertTriangle, Link2, Send, Loader2, Share2, Check, Timer, X, ListChecks } from 'lucide-react';
@@ -47,7 +48,7 @@ function AiTutor({ topic, onClose }: { topic: TheoryTopic; onClose: () => void }
     setInput('');
     setBusy(true);
     try {
-      const res = await fetch('/api/chat', {
+      const res = await aiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, history, systemInstruction: tutorInstruction(topic) }),

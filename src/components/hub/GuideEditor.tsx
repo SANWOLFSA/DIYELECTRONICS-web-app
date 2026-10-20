@@ -1,16 +1,18 @@
 // Create / edit a step-by-step guide or teardown: /guides/new[?device=..&kind=teardown], /guides/edit/:id
-// Drafts are private to the author; publishing makes the guide public. Images are https links
-// (no Cloud Storage bucket on this project), so the upload button explains that instead of failing.
+// Drafts are private to the author; publishing makes the guide public. Photos and the optional
+// video upload to Firebase Cloud Storage (src/lib/guideMedia.ts); https links still work too.
+// Teardowns need at least one photo on every step before they can be published.
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, ArrowUp, ArrowDown, Save, Send, Image as ImageIcon, AlertTriangle, ArrowLeft } from 'lucide-react';
+import { Plus, Trash2, ArrowUp, ArrowDown, Save, Send, Image as ImageIcon, AlertTriangle, ArrowLeft, Video, Loader2, X } from 'lucide-react';
 import { usePathname, navigate, RouteLink } from '../../hooks/usePathname';
 import {
   createGuide, updateGuide, getGuide, deviceRefFromSearch, validateGuide, friendlyHubError, isHttpsUrl,
-  DIFFICULTIES, GUIDE_KINDS, KIND_LABELS, LIMITS, IMAGE_UPLOAD_UNAVAILABLE,
+  DIFFICULTIES, GUIDE_KINDS, KIND_LABELS, LIMITS,
   type GuideInput, type GuideStep, type DeviceRef, type GuideKind, type GuideDifficulty,
 } from '../../lib/repairHub';
 import { PageShell, card, input, btnPrimary, btnMint, btnGhost, btnDanger, ErrorNote, Notice, SignInPrompt, Loading, useHubUser } from './ui';
 import DevicePicker from './DevicePicker';
+import { uploadGuideImage, uploadGuideVideo, checkGuideImage, checkGuideVideo, friendlyUploadError } from '../../lib/guideMedia';
 
 const emptyStep = (): GuideStep => ({ title: '', text: '', imageUrls: [''], caution: '' });
 
@@ -51,6 +53,10 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
   const [tools, setTools] = useState<string[]>([]);
   const [parts, setParts] = useState<string[]>([]);
   const [coverUrl, setCoverUrl] = useState('');
+  const [videoUrl, setVideoUrl] = useState('');
+  // Upload progress keyed by slot ('cover', 'video', 'step-3'); a key present means an upload is running.
+  const [uploads, setUploads] = useState<Record<string, number>>({});
+  const [triedPublish, setTriedPublish] = useState(false);
   const [steps, setSteps] = useState<GuideStep[]>([emptyStep()]);
   const [status, setStatus] = useState<'draft' | 'published'>('draft');
   const [busy, setBusy] = useState(false);
@@ -66,7 +72,7 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
       if (uid && g.ownerUid !== uid) { setLoadErr('Only the author can edit this guide.'); return; }
       setDevice({ key: g.deviceKey, label: g.deviceLabel, path: g.devicePath });
       setTitle(g.title); setSummary(g.summary); setKind(g.kind); setDifficulty(g.difficulty); setMinutes(g.minutes);
-      setTools(g.tools || []); setParts(g.parts || []); setCoverUrl(g.coverUrl || '');
+      setTools(g.tools || []); setParts(g.parts || []); setCoverUrl(g.coverUrl || ''); setVideoUrl(g.videoUrl || '');
       setSteps(g.steps?.length ? g.steps.map((s) => ({ ...s, imageUrls: s.imageUrls?.length ? s.imageUrls : [''] })) : [emptyStep()]);
       setStatus(g.status === 'published' ? 'published' : 'draft');
     }).catch((e) => alive && setLoadErr(friendlyHubError(e, 'open this guide'))).finally(() => alive && setLoading(false));
@@ -82,9 +88,60 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
   const setStep = (i: number, patch: Partial<GuideStep>) => setSteps((s) => s.map((x, j) => (j === i ? { ...x, ...patch } : x)));
   const move = (i: number, d: -1 | 1) => setSteps((s) => { const n = [...s]; const j = i + d; if (j < 0 || j >= n.length) return s; [n[i], n[j]] = [n[j], n[i]]; return n; });
 
+  const uploading = Object.keys(uploads).length > 0;
+  const setProgress = (key: string, pct: number | null) => setUploads((u) => {
+    const n = { ...u };
+    if (pct === null) delete n[key]; else n[key] = pct;
+    return n;
+  });
+
+  const uploadStepPhotos = async (i: number, list: File[]) => {
+    if (!list.length || !uid) return;
+    const room = LIMITS.stepImages - steps[i].imageUrls.filter(Boolean).length;
+    if (room <= 0) { setErr(`Step ${i + 1} already has ${LIMITS.stepImages} photos.`); return; }
+    const bad = list.map(checkGuideImage).find(Boolean);
+    if (bad) { setErr(bad); return; }
+    setErr('');
+    const key = `step-${i}`;
+    try {
+      for (const [n, f] of list.slice(0, room).entries()) {
+        const url = await uploadGuideImage(uid, f, (pct) => setProgress(key, Math.round((n * 100 + pct) / Math.min(list.length, room))));
+        setSteps((s) => s.map((x, j) => (j === i ? { ...x, imageUrls: [...x.imageUrls.filter(Boolean), url].slice(0, LIMITS.stepImages) } : x)));
+      }
+    } catch (e) {
+      setErr(friendlyUploadError(e));
+    } finally {
+      setProgress(key, null);
+    }
+  };
+
+  const uploadCover = async (f: File | undefined) => {
+    if (!f || !uid) return;
+    const bad = checkGuideImage(f);
+    if (bad) { setErr(bad); return; }
+    setErr('');
+    try { setCoverUrl(await uploadGuideImage(uid, f, (pct) => setProgress('cover', pct))); }
+    catch (e) { setErr(friendlyUploadError(e)); }
+    finally { setProgress('cover', null); }
+  };
+
+  const uploadVideo = async (f: File | undefined) => {
+    if (!f || !uid) return;
+    const bad = checkGuideVideo(f);
+    if (bad) { setErr(bad); return; }
+    setErr('');
+    try { setVideoUrl(await uploadGuideVideo(uid, f, (pct) => setProgress('video', pct))); }
+    catch (e) { setErr(friendlyUploadError(e)); }
+    finally { setProgress('video', null); }
+  };
+
+  const stepNeedsPhoto = (st: GuideStep) => kind === 'teardown' && !!(st.text.trim() || st.title.trim()) && !st.imageUrls.some((u) => u && isHttpsUrl(u));
+
   const save = async (publish: boolean) => {
     if (!device) { setErr('Choose the device this guide is for.'); return; }
-    const g: GuideInput = { title, summary, kind, device, difficulty, minutes, tools, parts, steps, coverUrl };
+    if (uploading) { setErr('Please wait for the uploads to finish.'); return; }
+    if (publish) setTriedPublish(true);
+    const g: GuideInput = { title, summary, kind, device, difficulty, minutes, tools, parts, steps, coverUrl, videoUrl };
     const v = validateGuide(g, publish);
     if (v) { setErr(v); return; }
     setBusy(true); setErr('');
@@ -113,7 +170,7 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
         </div>
         <div className="flex gap-2">
           <button onClick={() => save(false)} disabled={busy} className={btnGhost}><Save className="w-3.5 h-3.5" /> Save draft</button>
-          <button onClick={() => save(true)} disabled={busy} className={btnMint}><Send className="w-3.5 h-3.5" /> Publish</button>
+          <button onClick={() => save(true)} disabled={busy || uploading} className={btnMint}><Send className="w-3.5 h-3.5" /> Publish</button>
         </div>
       </div>
       {err && <ErrorNote message={err} />}
@@ -152,12 +209,31 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Cover image link (optional)</span>
             <div className="flex gap-2">
               <input value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://…" className={input} maxLength={1000} />
-              <label className={`${btnGhost} cursor-pointer shrink-0`}><ImageIcon className="w-3.5 h-3.5" /> Upload
-                <input type="file" accept="image/*" className="hidden" onChange={(e) => { e.target.value = ''; setNote(IMAGE_UPLOAD_UNAVAILABLE); }} />
+              <label className={`${btnGhost} cursor-pointer shrink-0`}>
+                {uploads.cover !== undefined ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> {uploads.cover}%</> : <><ImageIcon className="w-3.5 h-3.5" /> Upload</>}
+                <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" disabled={uploads.cover !== undefined} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadCover(f); }} />
               </label>
             </div>
             {coverUrl && isHttpsUrl(coverUrl) && <img src={coverUrl} alt="Cover preview" className="mt-2 h-28 rounded-lg object-cover" />}
           </label>
+          <div className="space-y-1 md:col-span-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5"><Video className="w-3.5 h-3.5" /> {kind === 'teardown' ? 'Teardown video' : 'Video'} (optional)</span>
+            <p className="text-[11px] text-slate-500">Upload an MP4, WebM or MOV up to 150 MB, or paste a video link (https://…).</p>
+            <div className="flex gap-2">
+              <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="https://… (or upload a file)" className={input} maxLength={1000} />
+              <label className={`${btnGhost} cursor-pointer shrink-0`}>
+                {uploads.video !== undefined ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> {uploads.video}%</> : <><Video className="w-3.5 h-3.5" /> Upload video</>}
+                <input type="file" accept="video/mp4,video/webm,video/quicktime" className="hidden" disabled={uploads.video !== undefined} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; uploadVideo(f); }} />
+              </label>
+              {videoUrl && <button type="button" onClick={() => setVideoUrl('')} className={btnGhost} aria-label="Remove video"><X className="w-3.5 h-3.5" /></button>}
+            </div>
+            {uploads.video !== undefined && (
+              <div className="h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${uploads.video}%` }} /></div>
+            )}
+            {videoUrl && isHttpsUrl(videoUrl) && /firebasestorage|\.(mp4|webm|mov)(\?|$)/i.test(videoUrl) && (
+              <video src={videoUrl} controls preload="metadata" className="mt-2 w-full max-w-xl rounded-xl bg-black" />
+            )}
+          </div>
         </div>
         <div className="grid md:grid-cols-2 gap-4">
           <ListEditor label="Tools" items={tools} onChange={setTools} placeholder="e.g. Phillips #00, spudger, multimeter" />
@@ -167,9 +243,9 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
 
       <div className="space-y-3">
         {steps.map((s, i) => (
-          <div key={i} className={`${card} p-5 space-y-3`}>
+          <div key={i} className={`${card} p-5 space-y-3 ${triedPublish && stepNeedsPhoto(s) ? 'ring-2 ring-rose-400' : ''}`}>
             <div className="flex items-center justify-between gap-2">
-              <div className="text-sm font-bold text-indigo-600 dark:text-indigo-400">Step {i + 1}</div>
+              <div className="text-sm font-bold text-indigo-600 dark:text-indigo-400">Step {i + 1}{kind === 'teardown' && <span className="ml-2 text-[10px] font-bold uppercase tracking-wider text-rose-500">Photo required</span>}</div>
               <div className="flex gap-1">
                 <button type="button" onClick={() => move(i, -1)} disabled={i === 0} className={btnGhost} aria-label="Move up"><ArrowUp className="w-3.5 h-3.5" /></button>
                 <button type="button" onClick={() => move(i, 1)} disabled={i === steps.length - 1} className={btnGhost} aria-label="Move down"><ArrowDown className="w-3.5 h-3.5" /></button>
@@ -183,18 +259,29 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
               <input value={s.caution} onChange={(e) => setStep(i, { caution: e.target.value })} maxLength={500} placeholder="Caution / warning for this step (optional)" className={input} />
             </div>
             <div className="space-y-2">
-              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Step images (https links, up to {LIMITS.stepImages})</div>
-              {s.imageUrls.map((u, k) => (
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Step photos ({kind === 'teardown' ? 'at least 1, ' : ''}up to {LIMITS.stepImages}: upload or paste https links)</div>
+              {s.imageUrls.some((u) => u && isHttpsUrl(u)) && (
+                <div className="flex flex-wrap gap-2">
+                  {s.imageUrls.filter((u) => u && isHttpsUrl(u)).map((u) => (
+                    <div key={u} className="relative">
+                      <img src={u} alt="" className="w-20 h-16 rounded-lg object-cover bg-slate-100" />
+                      <button type="button" onClick={() => setStep(i, { imageUrls: s.imageUrls.filter((x) => x !== u).length ? s.imageUrls.filter((x) => x !== u) : [''] })} className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-600 text-white text-xs leading-5" aria-label="Remove photo">×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {triedPublish && stepNeedsPhoto(s) && <p className="text-xs font-bold text-rose-600">Add at least one photo to this step.</p>}
+              {s.imageUrls.map((u, k) => (u.includes('firebasestorage.googleapis.com') ? null : (
                 <div key={k} className="flex gap-2 items-center">
-                  <input value={u} onChange={(e) => setStep(i, { imageUrls: s.imageUrls.map((x, j) => (j === k ? e.target.value : x)) })} placeholder="https://…" className={input} maxLength={1000} />
-                  {u && isHttpsUrl(u) && <img src={u} alt="" className="w-10 h-10 rounded object-cover bg-slate-100 shrink-0" />}
+                  <input value={u} onChange={(e) => setStep(i, { imageUrls: s.imageUrls.map((x, j) => (j === k ? e.target.value : x)) })} placeholder="https://… (image link)" className={input} maxLength={1000} />
                   <button type="button" onClick={() => setStep(i, { imageUrls: s.imageUrls.length > 1 ? s.imageUrls.filter((_, j) => j !== k) : [''] })} className={btnGhost} aria-label="Remove image">×</button>
                 </div>
-              ))}
+              )))}
               <div className="flex gap-2">
                 {s.imageUrls.length < LIMITS.stepImages && <button type="button" onClick={() => setStep(i, { imageUrls: [...s.imageUrls, ''] })} className={btnGhost}><Plus className="w-3.5 h-3.5" /> Image link</button>}
-                <label className={`${btnGhost} cursor-pointer`}><ImageIcon className="w-3.5 h-3.5" /> Upload photo
-                  <input type="file" accept="image/*" className="hidden" onChange={(e) => { e.target.value = ''; setNote(IMAGE_UPLOAD_UNAVAILABLE); }} />
+                <label className={`${btnPrimary} cursor-pointer`}>
+                  {uploads[`step-${i}`] !== undefined ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Uploading {uploads[`step-${i}`]}%</> : <><ImageIcon className="w-3.5 h-3.5" /> Upload photos</>}
+                  <input type="file" accept="image/jpeg,image/png,image/webp" multiple className="hidden" disabled={uploads[`step-${i}`] !== undefined} onChange={(e) => { const f = Array.from(e.target.files || []); e.target.value = ''; uploadStepPhotos(i, f); }} />
                 </label>
               </div>
             </div>
@@ -207,7 +294,7 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
 
       <div className="flex justify-end gap-2">
         <button onClick={() => save(false)} disabled={busy} className={btnGhost}><Save className="w-3.5 h-3.5" /> Save draft</button>
-        <button onClick={() => save(true)} disabled={busy} className={btnMint}><Send className="w-3.5 h-3.5" /> {busy ? 'Saving…' : 'Publish guide'}</button>
+        <button onClick={() => save(true)} disabled={busy || uploading} className={btnMint}><Send className="w-3.5 h-3.5" /> {busy ? 'Saving…' : uploading ? 'Uploading…' : kind === 'teardown' ? 'Publish teardown' : 'Publish guide'}</button>
       </div>
     </PageShell>
   );

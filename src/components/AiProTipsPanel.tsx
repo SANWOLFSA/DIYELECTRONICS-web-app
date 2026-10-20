@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiFetch';
 import { useState, useEffect } from 'react';
 import {
   ShieldAlert,
@@ -49,7 +50,7 @@ export default function ProTipsSidebar({
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/repair/pro-tips', {
+      const res = await aiFetch('/api/repair/pro-tips', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ deviceModel, deviceCategory, issueType }),

@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiFetch';
 import { useState, useEffect, useRef } from 'react';
 import Markdown from 'react-markdown';
 import { Bot, Send, User, Sparkles, RefreshCw, Terminal, Cpu, AlertTriangle, RotateCcw } from 'lucide-react';
@@ -116,7 +117,7 @@ export default function AiAssistantView() {
       // All AI calls go through the server (/api/chat) so the Gemini API key
       // never ships to the browser. The persona's system prompt lives on the server;
       // we only send which mode to use.
-      const res = await fetch('/api/chat', {
+      const res = await aiFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

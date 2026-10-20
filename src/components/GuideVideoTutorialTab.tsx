@@ -1,3 +1,4 @@
+import { aiFetch } from '../lib/aiFetch';
 import { useState, useEffect, useCallback } from 'react';
 import {
   Sparkles,
@@ -47,7 +48,7 @@ export default function GuideVideoTutorialTab({ guide }: GuideVideoTutorialTabPr
       setError(null);
       setTutorial(null);
       try {
-        const res = await fetch('/api/repair/video-tutorial', {
+        const res = await aiFetch('/api/repair/video-tutorial', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

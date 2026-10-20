@@ -11,7 +11,7 @@ import {
   matchesQuery, deviceSlug, normalizePartNumber, KIND_LABELS,
   type DiscoveredDevice, type DiscoveredComponent, type HubGuide, type HubQuestion,
 } from '../../lib/repairHub';
-import { findCommunityBoards, boardPath, type CommunityBoard } from '../../lib/boards';
+import { findCommunityBoards, boardPath, searchBoardsApi, type CommunityBoard, type WebResult } from '../../lib/boards';
 import { PageShell, card, Chip } from './ui';
 import RequestDevice from './RequestDevice';
 
@@ -26,16 +26,22 @@ function Group({ title, icon, rows, more }: { title: string; icon: ReactNode; ro
         {more && <RouteLink to={more.to} className="normal-case tracking-normal text-indigo-600 hover:underline">{more.label}</RouteLink>}
       </div>
       <div className="divide-y divide-slate-100 dark:divide-slate-800">
-        {rows.slice(0, 12).map((r) => (
-          <RouteLink key={r.key} to={r.to} className="flex items-center gap-3 px-5 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 group">
-            <span className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center shrink-0">{r.icon}</span>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-indigo-600 truncate">{r.title}</div>
-              <div className="text-[11px] text-slate-500 truncate">{r.sub}</div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600" />
-          </RouteLink>
-        ))}
+        {rows.slice(0, 12).map((r) => {
+          const inner = (
+            <>
+              <span className="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-800 flex items-center justify-center shrink-0 overflow-hidden">{r.icon}</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-bold text-slate-900 dark:text-slate-100 group-hover:text-indigo-600 truncate">{r.title}</div>
+                <div className="text-[11px] text-slate-500 truncate">{r.sub}</div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-indigo-600" />
+            </>
+          );
+          const cls = 'flex items-center gap-3 px-5 py-2.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 group';
+          return r.external
+            ? <a key={r.key} href={r.to} target="_blank" rel="noopener noreferrer" className={cls}>{inner}</a>
+            : <RouteLink key={r.key} to={r.to} className={cls}>{inner}</RouteLink>;
+        })}
       </div>
     </section>
   );
@@ -73,6 +79,23 @@ export default function GlobalSearch({ onOpenAuth }: { onOpenAuth?: () => void }
     return () => { alive = false; };
   }, [term, partLike]);
 
+  // Live online results (iFixit + Wikipedia via the server) so a search never comes back empty.
+  const [web, setWeb] = useState<WebResult[]>([]);
+  const [webLoading, setWebLoading] = useState(false);
+  useEffect(() => {
+    if (term.length < 2) { setWeb([]); return; }
+    let alive = true;
+    setWebLoading(true);
+    const t = setTimeout(() => {
+      searchBoardsApi(term, 'web')
+        .then((r) => alive && setWeb(r.web || []))
+        .catch(() => alive && setWeb([]))
+        .finally(() => alive && setWebLoading(false));
+    }, 350);
+    return () => { alive = false; clearTimeout(t); };
+  }, [term]);
+  const boardLike = partLike || /\b(board|motherboard|mainboard|logic|pcb)\b/i.test(term);
+
   const res = useMemo(() => {
     if (term.length < 2) return null;
     const catalog: Row[] = searchCatalog(term, 40).map((h) => ({
@@ -103,8 +126,12 @@ export default function GlobalSearch({ onOpenAuth }: { onOpenAuth?: () => void }
     const brd: Row[] = boards.map((b) => ({
       key: `b${b.id}`, to: boardPath(b.number), title: b.displayNumber, sub: `PCB board · ${b.photoCount} photos${b.manufacturer ? ` · ${b.manufacturer}` : ''}`, icon: <CircuitBoard className="w-4 h-4 text-emerald-500" />,
     }));
-    return { catalog, universal, comps, guides: [...hubGuides, ...seedGuides], qs, vids, parts, brd };
-  }, [term, devices, components, guides, questions, videos, boards]);
+    const online: Row[] = web.map((w) => ({
+      key: `w${w.url}`, to: w.url, external: true, title: w.title, sub: `${w.source} · ${w.kind}${w.snippet ? ` · ${w.snippet}` : ''}`,
+      icon: w.image ? <img src={w.image} alt="" loading="lazy" className="w-8 h-8 object-cover" /> : <Globe2 className="w-4 h-4 text-slate-400" />,
+    }));
+    return { catalog, universal, comps, guides: [...hubGuides, ...seedGuides], qs, vids, parts, brd, online };
+  }, [term, devices, components, guides, questions, videos, boards, web]);
 
   const total = res ? Object.values(res).reduce((a, l) => a + l.length, 0) : 0;
   const slug = deviceSlug(term);
@@ -141,7 +168,7 @@ export default function GlobalSearch({ onOpenAuth }: { onOpenAuth?: () => void }
             <div className="flex flex-wrap gap-2">
               {!hasExactDevice && <RouteLink to={`/device/${slug}?q=${encodeURIComponent(term)}`} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700"><Globe2 className="w-3.5 h-3.5" /> Device page for “{term}”</RouteLink>}
               {pn.length >= 2 && <RouteLink to={`/components/${encodeURIComponent(pn)}?q=${encodeURIComponent(term)}`} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-950 text-white hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"><Cpu className="w-3.5 h-3.5" /> Component “{pn}”</RouteLink>}
-              {partLike && <RouteLink to={boardPath(term)} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200"><CircuitBoard className="w-3.5 h-3.5" /> PCB board “{pn}”</RouteLink>}
+              {boardLike && <RouteLink to={boardPath(term)} className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200"><CircuitBoard className="w-3.5 h-3.5" /> PCB board “{pn}”</RouteLink>}
             </div>
           </div>
           <div className="grid lg:grid-cols-2 gap-4">
@@ -153,8 +180,10 @@ export default function GlobalSearch({ onOpenAuth }: { onOpenAuth?: () => void }
             <Group title="Repair videos" icon={<Video className="w-4 h-4" />} rows={res.vids} />
             <Group title="PCB boards" icon={<CircuitBoard className="w-4 h-4" />} rows={res.brd} />
             <Group title="Spare parts" icon={<Package className="w-4 h-4" />} rows={res.parts} />
+            <Group title="Online results" icon={<Globe2 className="w-4 h-4" />} rows={res.online} more={boardLike ? { to: boardPath(term), label: 'Full board page' } : undefined} />
           </div>
-          {total === 0 && <RequestDevice initialName={term} onOpenAuth={onOpenAuth} compact />}
+          {webLoading && !web.length && <p className="text-xs text-slate-500">Searching online…</p>}
+          {total === 0 && !webLoading && <RequestDevice initialName={term} onOpenAuth={onOpenAuth} compact />}
           <p className="text-[11px] text-slate-500 flex items-center gap-1"><Chip>Tip</Chip> Model numbers from the rating label (e.g. SM-A156B, UA55AU7000) give the most accurate device pages.</p>
         </>
       )}

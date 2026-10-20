@@ -97,6 +97,28 @@ service firebase.storage {
       allow delete: if isOwner(uid) || isAdmin();
     }
 
+    // --- Guide & teardown step photos (PUBLIC read) ---------------------
+    // guideImages/{uid}/{fileName}: JPG/PNG/WebP, max 10 MB, write-once.
+    match /guideImages/{uid}/{fileName} {
+      allow read: if true;
+      allow create: if isOwner(uid)
+        && request.resource.size <= 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
+    // --- Optional guide & teardown videos (PUBLIC read) ----------------
+    // guideVideos/{uid}/{fileName}: MP4 / WebM / MOV, max 150 MB, write-once.
+    match /guideVideos/{uid}/{fileName} {
+      allow read: if true;
+      allow create: if isOwner(uid)
+        && request.resource.size <= 150 * 1024 * 1024
+        && request.resource.contentType.matches('video/(mp4|webm|quicktime)');
+      allow update: if false;
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
     // Everything else is denied by default.
   }
 }
