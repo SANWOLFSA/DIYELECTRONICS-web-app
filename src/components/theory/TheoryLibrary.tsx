@@ -16,12 +16,14 @@ export default function TheoryLibrary({
   onOpenTopic,
   onCloseTopic,
   onStartExam,
+  onReadInBook,
   primaryClass,
 }: {
   topicId?: string;
   onOpenTopic: (id: string) => void;
   onCloseTopic: () => void;
   onStartExam: () => void;
+  onReadInBook?: (topicId: string) => void;
   primaryClass: string;
 }) {
   const [topics, setTopics] = useState<TheoryTopic[] | null>(null);
@@ -96,7 +98,7 @@ export default function TheoryLibrary({
         </div>
       );
     }
-    return <TopicDetail topic={selected} allTopics={topics} onBack={onCloseTopic} onOpenTopic={onOpenTopic} onStartExam={onStartExam} primaryClass={primaryClass} />;
+    return <TopicDetail topic={selected} allTopics={topics} onBack={onCloseTopic} onOpenTopic={onOpenTopic} onStartExam={onStartExam} onReadInBook={onReadInBook} primaryClass={primaryClass} />;
   }
 
   const levelCounts = (l: TheoryLevel) => topics.filter(t => t.levels.includes(l)).length;

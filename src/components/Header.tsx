@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Wrench, Search, Menu, PanelLeft } from 'lucide-react';
+import { Wrench, Search, Menu, PanelLeft, Heart } from 'lucide-react';
 import { initialGuides, initialParts } from '../data';
 import { navigate } from '../hooks/usePathname';
 
@@ -159,6 +159,16 @@ export default function Header({
             </div>
           )}
         </div>
+
+        {/* Small, optional "Support" link (never a popup) */}
+        <button
+          type="button"
+          onClick={() => navigate('/support')}
+          className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+          aria-label="Support the app"
+        >
+          <Heart className="w-3.5 h-3.5" /> Support
+        </button>
 
         {/* Mobile: search opens the universal search page */}
         <button

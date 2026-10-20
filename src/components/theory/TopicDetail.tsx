@@ -1,7 +1,7 @@
-import { aiFetch } from '../../lib/aiFetch';
+import { streamChat, prewarmAi } from '../../lib/aiStream';
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
-import { ArrowLeft, Bot, Lightbulb, Sigma, AlertTriangle, Link2, Send, Loader2, Share2, Check, Timer, X, ListChecks } from 'lucide-react';
+import { ArrowLeft, BookOpen, Bot, Lightbulb, Sigma, AlertTriangle, Link2, Send, Loader2, Share2, Check, Timer, X, ListChecks } from 'lucide-react';
 import { subjectLabel, THEORY_SUBJECTS } from '../../data/theory';
 import type { TheoryTopic } from '../../data/theory';
 import { LevelPills } from './LevelPills';
@@ -38,6 +38,7 @@ function AiTutor({ topic, onClose }: { topic: TheoryTopic; onClose: () => void }
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [turns, busy]);
+  useEffect(() => { prewarmAi(); }, []);
 
   const ask = async (text: string) => {
     const message = text.trim();
@@ -48,18 +49,18 @@ function AiTutor({ topic, onClose }: { topic: TheoryTopic; onClose: () => void }
     setInput('');
     setBusy(true);
     try {
-      const res = await aiFetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, history, systemInstruction: tutorInstruction(topic) }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      const reply = typeof data?.reply === 'string' && data.reply.trim() ? data.reply : 'Sorry — I could not come up with an answer just now.';
-      setTurns(t => [...t, { role: 'model', text: reply }]);
+      // Streamed: the first words appear in about a second and the answer grows as it arrives.
+      let started = false;
+      await streamChat(
+        { message, history, mode: 'tutor', context: tutorInstruction(topic), lookupBoards: false },
+        (full) => {
+          if (!started) { started = true; setTurns(t => [...t, { role: 'model', text: full }]); }
+          else setTurns(t => { const c = [...t]; c[c.length - 1] = { role: 'model', text: full }; return c; });
+        },
+      );
     } catch {
       setErr('The AI tutor is unavailable right now. Please try again in a moment.');
-      setTurns(t => t.slice(0, -1));
+      setTurns(t => (t[t.length - 1]?.role === 'model' ? t.slice(0, -2) : t.slice(0, -1)));
       setInput(message);
     } finally {
       setBusy(false);
@@ -104,8 +105,8 @@ function AiTutor({ topic, onClose }: { topic: TheoryTopic; onClose: () => void }
               </div>
             </div>
           ))}
-          {busy && (
-            <div className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Tutor is thinking…</div>
+          {busy && turns[turns.length - 1]?.role === 'user' && (
+            <div className="flex items-center gap-1.5 text-xs text-slate-500" aria-label="Tutor is typing"><span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce" /><span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:120ms]" /><span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-bounce [animation-delay:240ms]" /></div>
           )}
           <div ref={endRef} />
         </div>
@@ -136,6 +137,7 @@ export default function TopicDetail({
   onBack,
   onOpenTopic,
   onStartExam,
+  onReadInBook,
   primaryClass,
 }: {
   topic: TheoryTopic;
@@ -143,6 +145,7 @@ export default function TopicDetail({
   onBack: () => void;
   onOpenTopic: (id: string) => void;
   onStartExam: () => void;
+  onReadInBook?: (topicId: string) => void;
   primaryClass: string;
 }) {
   const [tutorOpen, setTutorOpen] = useState(false);
@@ -189,7 +192,12 @@ export default function TopicDetail({
         <p className="text-sm sm:text-base text-slate-600 dark:text-slate-300">{topic.summary}</p>
         <div className="flex flex-wrap items-center gap-2">
           <LevelPills levels={topic.levels} />
-          <button onClick={() => setTutorOpen(o => !o)} className={`${primaryClass} ml-auto text-white px-3.5 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-md shadow-indigo-500/20`}>
+          {onReadInBook && (
+            <button onClick={() => onReadInBook(topic.id)} className="ml-auto px-3.5 py-2 rounded-xl text-sm font-bold flex items-center gap-2 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800">
+              <BookOpen className="w-4 h-4" /> Read in book
+            </button>
+          )}
+          <button onClick={() => setTutorOpen(o => !o)} className={`${primaryClass} ${onReadInBook ? '' : 'ml-auto'} text-white px-3.5 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-md shadow-indigo-500/20`}>
             <Bot className="w-4 h-4" /> Ask AI tutor
           </button>
         </div>

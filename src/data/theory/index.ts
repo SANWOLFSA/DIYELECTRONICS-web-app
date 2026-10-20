@@ -38,6 +38,21 @@ export function loadAllTopics(): Promise<TheoryTopic[]> {
   return topicsPromise;
 }
 
+let orderedPromise: Promise<TheoryTopic[]> | null = null;
+
+/** Loads every topic in authored (teaching) order, chapter by chapter. Used by the Theory book. */
+export function loadTopicsInOrder(): Promise<TheoryTopic[]> {
+  if (!orderedPromise) {
+    orderedPromise = Promise.all(topicLoaders.map(load => load()))
+      .then(mods => mods.flatMap(m => m.default))
+      .catch(err => {
+        orderedPromise = null;
+        throw err;
+      });
+  }
+  return orderedPromise;
+}
+
 const questionCache: Partial<Record<TheoryLevel, Promise<TheoryQuestion[]>>> = {};
 
 /** Loads the seeded question bank for one level (cached). */

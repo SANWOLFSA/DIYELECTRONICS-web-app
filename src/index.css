@@ -296,3 +296,31 @@
     color: #fff;
   }
 }
+
+/* ---- AI assistant: circuit map overlays & power-flow animation ---- */
+@keyframes cm-flash {
+  0%, 100% { box-shadow: 0 0 0 2px rgb(239 68 68 / 0.95), 0 0 6px 2px rgb(239 68 68 / 0.55); background-color: rgb(239 68 68 / 0.10); }
+  50% { box-shadow: 0 0 0 3px rgb(239 68 68 / 1), 0 0 18px 6px rgb(239 68 68 / 0.85); background-color: rgb(239 68 68 / 0.28); }
+}
+.cm-flash { animation: cm-flash 0.9s ease-in-out infinite; border-color: rgb(239 68 68) !important; }
+@keyframes cm-flash-svg {
+  0%, 100% { stroke: rgb(239 68 68); stroke-opacity: 1; filter: drop-shadow(0 0 2px rgb(239 68 68 / 0.6)); }
+  50% { stroke: rgb(254 202 202); stroke-opacity: 0.6; filter: drop-shadow(0 0 7px rgb(239 68 68 / 0.95)); }
+}
+.cm-flash-svg { animation: cm-flash-svg 0.9s ease-in-out infinite; }
+@keyframes cm-flow { to { stroke-dashoffset: -28; } }
+.cm-flow { stroke-dasharray: 8 6; animation: cm-flow 0.8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .cm-flash, .cm-flash-svg, .cm-flow { animation-duration: 2.4s; }
+}
+
+/* AI replies: GFM tables scroll sideways inside the bubble instead of overflowing the screen */
+.ai-md table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.8125rem; }
+.ai-md th, .ai-md td { border: 1px solid var(--color-graphite-700, #3a3f4b); padding: 0.375rem 0.625rem; text-align: left; vertical-align: top; }
+.ai-md th { background: rgb(70 105 245 / 0.12); font-weight: 600; white-space: nowrap; }
+html:not(.dark) .ai-md th, html:not(.dark) .ai-md td { border-color: #d6d9e0; }
+
+/* ---- Theory book: page-turn shading ---- */
+.book-scroller { scroll-behavior: auto; -webkit-overflow-scrolling: touch; }
+.book-page { --shade: 0; }
+.book-shade { background: linear-gradient(90deg, rgb(0 0 0 / 0.35), transparent 30%, transparent 70%, rgb(0 0 0 / 0.35)); opacity: var(--shade); }

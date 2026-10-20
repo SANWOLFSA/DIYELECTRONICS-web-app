@@ -67,9 +67,10 @@ function fmtNum(n: number) {
   return String(Number(n.toPrecision(4)));
 }
 
-export default function ExamRoom({ onStudyTopic, primaryClass }: { onStudyTopic: (topicId: string) => void; primaryClass: string }) {
+export default function ExamRoom({ onStudyTopic, primaryClass, initialSubject }: { onStudyTopic: (topicId: string) => void; primaryClass: string; initialSubject?: TheorySubjectId }) {
   const [phase, setPhase] = useState<Phase>('setup');
-  const [cfg, setCfg] = useState<ExamConfig>({ level: 'college', subjects: [], count: 10, timed: true });
+  // A chapter quiz from the Theory book opens with that chapter (subject) preselected.
+  const [cfg, setCfg] = useState<ExamConfig>({ level: 'college', subjects: initialSubject ? [initialSubject] : [], count: 10, timed: !initialSubject });
   const [bank, setBank] = useState<TheoryQuestion[] | null>(null);
   const [bankError, setBankError] = useState<string | null>(null);
   const [aiPool, setAiPool] = useState<TheoryQuestion[]>([]);
@@ -437,7 +438,7 @@ export default function ExamRoom({ onStudyTopic, primaryClass }: { onStudyTopic:
       <div className="rounded-3xl p-5 sm:p-7 bg-gradient-to-br from-indigo-600 via-violet-600 to-emerald-500 text-white shadow-lg shadow-indigo-500/20">
         <div className="flex flex-col sm:flex-row sm:items-center gap-4">
           <div className="w-24 h-24 rounded-full bg-white/15 border-4 border-white/40 flex items-center justify-center shrink-0">
-            <span className="text-3xl font-bold">{percent}%</span>
+            <span className="flex flex-col items-center leading-none"><span className="text-2xl font-bold">{correctCount}/{exam.length}</span><span className="text-sm font-semibold text-white/85 mt-1">{percent}%</span></span>
           </div>
           <div className="space-y-1">
             {newBest && <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-300 text-amber-950 text-[11px] font-bold"><Trophy className="w-3.5 h-3.5" /> New best score</span>}
@@ -446,7 +447,7 @@ export default function ExamRoom({ onStudyTopic, primaryClass }: { onStudyTopic:
           </div>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
-          <button onClick={start} className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white text-indigo-700 text-sm font-bold"><RotateCcw className="w-4 h-4" /> New paper, same settings</button>
+          <button onClick={start} className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white text-indigo-700 text-sm font-bold"><RotateCcw className="w-4 h-4" /> Retake (new questions)</button>
           <button onClick={() => setPhase('setup')} className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/15 border border-white/30 text-sm font-bold">Change settings</button>
         </div>
       </div>
@@ -497,7 +498,8 @@ export default function ExamRoom({ onStudyTopic, primaryClass }: { onStudyTopic:
                 <div className="space-y-1.5 min-w-0">
                   <p className="text-sm font-bold text-slate-900 dark:text-white"><span className="text-slate-400 mr-1">Q{i + 1}.</span>{q.prompt}</p>
                   <p className="text-xs text-slate-600 dark:text-slate-300"><span className="font-bold">Your answer:</span> {yours}</p>
-                  {!ok && <p className="text-xs text-emerald-700 dark:text-emerald-300"><span className="font-bold">Correct answer:</span> {right}</p>}
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300"><span className="font-bold">Correct answer:</span> {right}</p>
+                  <p className={`text-[11px] font-bold ${ok ? 'text-emerald-600 dark:text-emerald-300' : 'text-rose-600 dark:text-rose-300'}`}>{ok ? 'Correct' : ans && isAnswered(q, ans) ? 'Incorrect' : 'Not answered'}</p>
                   <p className="text-xs text-slate-700 dark:text-slate-300 bg-white/70 dark:bg-slate-900/60 rounded-lg px-2.5 py-2 font-mono leading-relaxed">{q.solution}</p>
                   <button onClick={() => onStudyTopic(q.topicId)} className="text-[11px] font-bold text-indigo-600 dark:text-indigo-300">Study: {topicTitle(q.topicId)} →</button>
                 </div>

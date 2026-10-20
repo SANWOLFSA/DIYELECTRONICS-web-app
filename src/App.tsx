@@ -11,6 +11,8 @@ import UserProgress from './components/UserProgress';
 import AuthModal from './components/AuthModal';
 import LandingPage from './components/LandingPage';
 import AiAssistantView from './components/AiAssistantView';
+import { initAnalytics, logPageView } from './lib/analytics';
+const SupportView = lazy(() => import('./components/SupportView'));
 import BlueprintViewer from './components/BlueprintViewer';
 import SettingsView from './components/SettingsView';
 import AboutView from './components/AboutView';
@@ -36,7 +38,7 @@ import { doc, getDoc, collection, addDoc, serverTimestamp } from 'firebase/fires
 import { initialGuides, initialCourses, initialPosts } from './data';
 import type { UserProfile, Guide, ForumPost } from './types';
 
-const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'help', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
+const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'support', 'help', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
 const TAB_ALIASES: Record<string, string> = { learning: 'theory', studies: 'theory', courses: 'theory', electrical_theory: 'theory', exam_room: 'theory', forum: 'home', parts: 'components', spare_parts: 'components' };
 /**
  * Old routes that were merged into another page. They redirect (replace) to the canonical URL:
@@ -115,6 +117,15 @@ export default function App() {
   };
 
   const currentTheme = APP_THEMES[themeId] || APP_THEMES[DEFAULT_THEME_ID];
+
+  // Visitor analytics (Firebase / GA4): one page_view per route (path + in-page hash routes).
+  useEffect(() => {
+    initAnalytics();
+    const onHash = () => logPageView();
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  useEffect(() => { logPageView(); }, [pathname]);
 
   // Merged / retired routes redirect to their canonical page.
   useEffect(() => {
@@ -333,7 +344,7 @@ export default function App() {
           onSignOut={handleSignOut}
         />
 
-        <main className="flex-1 w-full min-w-0 pb-16">
+        <main className={`flex-1 w-full min-w-0 ${activeTab === 'ai_assistant' ? 'pb-0' : 'pb-16'}`}>
           {activeTab === 'not_found' && <NotFound onGoHome={() => setActiveTab('home')} />}
           {activeTab === 'home' && (
             <HomeFeed 
@@ -447,6 +458,10 @@ export default function App() {
               savedGuidesCount={savedGuideIds.length}
               onSignOut={handleSignOut}
             />
+          )}
+
+          {activeTab === 'support' && (
+            <Suspense fallback={hubFallback}><SupportView /></Suspense>
           )}
 
           {activeTab === 'about' && (

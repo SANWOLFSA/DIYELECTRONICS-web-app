@@ -33,6 +33,9 @@ const firebaseConfig = {
   storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: env.VITE_FIREBASE_APP_ID,
+  // Optional: Google Analytics 4 measurement id (G-XXXX). If unset, Firebase looks it up from the
+  // project when Analytics is enabled (Firebase console > Project settings > Integrations > Google Analytics).
+  measurementId: env.VITE_FIREBASE_MEASUREMENT_ID || undefined,
   firestoreDatabaseId: env.VITE_FIREBASE_DATABASE_ID
 };
 
@@ -65,6 +68,7 @@ const effectiveConfig = isFirebaseConfigured
     };
 
 const app = initializeApp(effectiveConfig);
+export const firebaseApp = app;
 export const db = effectiveConfig.firestoreDatabaseId
   ? getFirestore(app, effectiveConfig.firestoreDatabaseId)
   : getFirestore(app);

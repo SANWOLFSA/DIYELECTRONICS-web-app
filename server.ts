@@ -24,6 +24,15 @@ function getClientIp(req: express.Request): string {
   return (raw ? String(raw).split(',')[0].trim() : '') || req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
+/** Same per-IP limit for routes served outside Express (the streaming chat function). */
+export function rateLimitOk(ip: string): boolean {
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+  if (!bucket || bucket.resetAt <= now) { bucket = { count: 0, resetAt: now + RATE_WINDOW_MS }; rateBuckets.set(ip, bucket); }
+  bucket.count += 1;
+  return bucket.count <= RATE_MAX_REQUESTS;
+}
+
 app.use((req, res, next) => {
   if (req.method !== 'POST') return next();
   const now = Date.now();
@@ -157,18 +166,25 @@ async function callGeminiWithCascade(
   onResponse?: (response: any) => void
 ): Promise<string> {
   const budgetMs = Number(extraConfig?.__budgetMs) || GEMINI_BUDGET_MS;
+  // Internal options (never sent to Gemini): a custom model list, thinking level, parallel starts
+  // and an external abort signal (used by callGeminiSmart to stop the fallback race).
+  const customModels: string[] | undefined = Array.isArray(extraConfig?.__models) ? extraConfig!.__models : undefined;
+  const thinkingLevel: string = typeof extraConfig?.__thinking === 'string' ? extraConfig!.__thinking : 'LOW';
+  const parallelStart: number = Number(extraConfig?.__parallel) || GEMINI_PARALLEL_START;
+  const externalSignal: AbortSignal | undefined = extraConfig?.__signal;
+  const passThrough = { __models: customModels, __thinking: extraConfig?.__thinking, __parallel: extraConfig?.__parallel, __signal: externalSignal };
   if (extraConfig) {
     extraConfig = { ...extraConfig };
-    delete extraConfig.__fast; delete extraConfig.__budgetMs;
+    for (const k of ['__fast', '__budgetMs', '__models', '__thinking', '__parallel', '__signal']) delete extraConfig[k];
     if (!Object.keys(extraConfig).length) extraConfig = undefined;
   }
 
   // Grounding (Google Search) needs a billed project; on the free tier it is a fast 429, so skip it.
   if (tools && Date.now() < groundingBlockedUntil) {
-    return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __budgetMs: budgetMs }, onResponse);
+    return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), ...passThrough, __budgetMs: budgetMs }, onResponse);
   }
 
-  const models = orderModels(GEMINI_MODELS.length ? GEMINI_MODELS : DEFAULT_GEMINI_MODELS);
+  const models = customModels ? [...customModels] : orderModels(GEMINI_MODELS.length ? GEMINI_MODELS : DEFAULT_GEMINI_MODELS);
   const startedAt = Date.now();
   const controllers: AbortController[] = [];
   const errors: string[] = [];
@@ -183,7 +199,7 @@ async function callGeminiWithCascade(
     const timer = setTimeout(() => ctrl.abort(), Math.max(1000, remaining));
     const t0 = Date.now();
     try {
-      const config: any = { thinkingConfig: { thinkingLevel: 'LOW' }, abortSignal: ctrl.signal };
+      const config: any = { thinkingConfig: { thinkingLevel }, abortSignal: ctrl.signal };
       if (systemInstruction) config.systemInstruction = systemInstruction;
       if (tools) config.tools = tools;
       if (extraConfig) Object.assign(config, extraConfig);
@@ -197,7 +213,7 @@ async function callGeminiWithCascade(
       if (tools && /429|RESOURCE_EXHAUSTED|quota/i.test(msg)) sawQuotaOnTools = true;
       lastError = err; errors.push(`${model}: ${msg.slice(0, 140)}`);
       // Aborts caused by another model winning are not failures.
-      if (!(ctrl.signal.aborted && settled)) modelHealth.set(model, { failUntil: Date.now() + 2 * 60 * 1000, lastMs: Date.now() - t0 });
+      if (!(ctrl.signal.aborted && settled)) modelHealth.set(model, { failUntil: Date.now() + (/exceeded your current quota/i.test(msg) ? 10 : 2) * 60 * 1000, lastMs: Date.now() - t0 });
       throw err;
     } finally {
       clearTimeout(timer);
@@ -215,6 +231,10 @@ async function callGeminiWithCascade(
       resolve(v);
     };
     const overall = setTimeout(() => finish(null), budgetMs + 500);
+    if (externalSignal) {
+      if (externalSignal.aborted) { finish(null); return; }
+      externalSignal.addEventListener('abort', () => finish(null), { once: true });
+    }
     const launch = () => {
       if (done) return;
       clearTimeout(hedgeTimer);
@@ -227,7 +247,7 @@ async function callGeminiWithCascade(
       attempt(model).then(finish, () => { running--; launch(); });
       hedgeTimer = setTimeout(launch, GEMINI_HEDGE_MS);
     };
-    for (let i = 0; i < GEMINI_PARALLEL_START; i++) launch();
+    for (let i = 0; i < parallelStart; i++) launch();
   });
 
   if (result) {
@@ -241,10 +261,45 @@ async function callGeminiWithCascade(
     console.warn('Grounded Gemini calls were rate-limited; answering without tools for the next 15 minutes.');
     groundingBlockedUntil = Date.now() + 15 * 60 * 1000;
     const left = budgetMs - (Date.now() - startedAt);
-    if (left > 5000) return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), __budgetMs: left }, onResponse);
+    if (left > 5000) return callGeminiWithCascade(ai, withoutSearchNote(contents), systemInstruction, undefined, { ...(extraConfig || {}), ...passThrough, __budgetMs: left }, onResponse);
   }
   const busy = errors.length === 0 || errors.every((e) => isBusyError(e));
   throw lastError && !busy ? lastError : new Error(`All candidate Gemini models were unavailable (${errors.join(' | ') || 'timed out'}).`);
+}
+
+// "Smart" calls (the SANWOLF chat brain and circuit maps): the strongest free-tier models start
+// first with MEDIUM thinking; the fast LOW-thinking race only starts if they have not answered
+// after SMART_HEAD_START_MS (or as soon as they fail). The first good answer wins and the other
+// race is aborted. Pro models have no free-tier quota (429 on 2026-10-20), so they are not listed
+// by default; override with GEMINI_SMART_MODELS (comma list) once billing is enabled.
+const SMART_MODELS = (process.env.GEMINI_SMART_MODELS || 'gemini-3.7-flash,gemini-3.6-flash').split(',').map((m) => m.trim()).filter(Boolean);
+const SMART_HEAD_START_MS = Number(process.env.GEMINI_SMART_HEAD_START_MS) || 7000;
+async function callGeminiSmart(ai: GoogleGenAI, contents: any, systemInstruction?: string, extraConfig?: Record<string, any>): Promise<string> {
+  const budgetMs = Number(extraConfig?.__budgetMs) || GEMINI_BUDGET_MS;
+  const startedAt = Date.now();
+  const base = { ...(extraConfig || {}) }; delete base.__budgetMs;
+  const smartStop = new AbortController();
+  const fastStop = new AbortController();
+  let startFast: () => void = () => {};
+  const fastGate = new Promise<void>((r) => { startFast = r; });
+  const headTimer = setTimeout(() => startFast(), SMART_HEAD_START_MS);
+  const smart = callGeminiWithCascade(ai, contents, systemInstruction, undefined,
+    { ...base, __models: orderModels(SMART_MODELS), __thinking: 'MEDIUM', __parallel: 1, __budgetMs: budgetMs - 500, __signal: smartStop.signal });
+  smart.catch(() => startFast());
+  const fast = fastGate.then(() => {
+    const left = budgetMs - (Date.now() - startedAt);
+    if (left < 3000) throw new Error('No time left for the fallback models.');
+    return callGeminiWithCascade(ai, contents, systemInstruction, undefined, { ...base, __budgetMs: left, __signal: fastStop.signal });
+  });
+  try {
+    const text = await Promise.any([smart, fast]);
+    return text;
+  } catch (e: any) {
+    throw e?.errors?.[0] || e;
+  } finally {
+    clearTimeout(headTimer); startFast();
+    smartStop.abort(); fastStop.abort();
+  }
 }
 
 // ---- Shared AI route helpers --------------------------------------------------
@@ -260,59 +315,267 @@ const AI_UNAVAILABLE = 'The AI service is busy or unavailable right now. Please 
 const CHAT_SAFETY_RULES = `Safety and policy rules (always apply):
 - Never give instructions to bypass, remove or defeat Factory Reset Protection (FRP), Google account locks, iCloud Activation Lock, carrier/network locks, screen passcodes or any other anti-theft protection, even if the user says it is their own device. Politely decline the bypass and instead explain the legitimate owner routes: sign in with the original account, use official account recovery (accounts.google.com/signin/recovery or iforgot.apple.com), or take proof of purchase to the manufacturer, carrier or an authorised service centre.
 - Ordinary hardware diagnosis and repair of a locked device (screen, battery, charging, boards) is fine to help with.
-- Warn clearly about mains voltage, charged capacitors and lithium battery hazards whenever they are relevant.
-- If you are not sure, say so instead of inventing part numbers, measurements or prices.
-- Format answers in clean Markdown with short headings and concise bullet points.`;
+- Warn clearly about mains voltage, charged capacitors (the big primary filter cap can hold 300-400 V DC long after unplugging), CRT/inverter high voltage, microwave oven HV parts and lithium battery hazards whenever they are relevant. Say how to discharge safely.
+- If you are not sure, say so instead of inventing part numbers, measurements or prices.`;
+
+/** How every persona thinks and writes (the "brain"). */
+const CHAT_METHOD = `How you work:
+- Think like a senior bench technician. Reason step by step internally: symptom -> which section of the board is most likely at fault (power input/fuse, PFC, main SMPS, standby supply, DC-DC regulators, SoC/CPU, memory, backlight/LED driver, audio, panel/T-CON, charging, etc.) -> the specific components in that section -> exact measurements (meter mode, test points, expected values with units) -> what each result means and the next step.
+- Answer first: open with the most likely cause and the first thing to check in 1-3 short lines, then the detail. No filler, no "great question".
+- If a key fact is missing (exact model / board number, the symptom, what has already been tried or measured) and it really changes the answer, give your best provisional advice AND ask ONE sharp clarifying question at the end. Never ask more than one question.
+- Use the whole conversation: earlier messages and earlier photos are context, refer back to them.
+- Never guess which product a board came from (e.g. "used in plasma TVs") unless the label, the user or a cited web result says so; state the brand and part numbers you can read.
+- Photos / video frames: describe what you actually see (visible damage, bulging or leaking caps, burnt resistors, corrosion, cracked solder, missing parts, readable markings). Read printed part numbers only when legible; say "not legible" otherwise.
+- Web results and board photos supplied in the prompt are evidence: cite them inline as [1], [2] when you use them. Never invent part numbers, pinouts, schematics or voltages you do not know: say you are unsure and how to confirm (label, service manual, datasheet, measuring).
+- Be concrete with numbers: e.g. "standby 5 V on the CN801 pin marked 5VSB", "big filter cap ~310-340 V DC on 230 V mains", "ESR under 0.5 ohm for a 1000 uF 25 V low-ESR cap".
+- End with one suggested next action on its own line starting with "Next:", e.g. "Next: Map this board (tap + then Map circuit)", "Next: Upload a clear photo of the power supply board", or "Next: measure the 12 V rail and tell me the reading".
+- Format in clean Markdown: short headings, bullets, and Markdown tables for measurements / colour codes when helpful. Keep it scannable on a phone.`;
 
 /** Whitelisted chat modes. The client sends a mode id; it can never send its own system prompt. */
 const CHAT_PERSONAS: Record<string, string> = {
-  copilot: `You are the DIY Electronics repair assistant, built into the DIY Electronics web app. You help people diagnose and repair consumer electronics: component troubleshooting, soldering, multimeter checks, smartphone, laptop, console and TV repair.`,
-  codefox: `You are CODEFOX, the DIY Electronics embedded-systems assistant. You help with microcontrollers (Arduino, ESP32, Raspberry Pi), firmware, and C/C++/Python code. Give working code examples, debugging tips and wiring instructions.`,
-  circuitbear: `You are CIRCUITBEAR, the DIY Electronics circuit-design assistant. You help with circuit theory, PCB layout, power delivery and schematic analysis.`,
-  'phone-repair': `You are the DIY Electronics phone repair assistant. Write practical, step-by-step troubleshooting and repair guides for smartphones. Include a "Required tools" section when relevant.`,
+  copilot: `You are SANWOLF, the expert AI repair technician built into the DIY Electronics web app (South Africa based users; mains is 230 V 50 Hz unless told otherwise). You diagnose and repair consumer electronics: TVs and their power supply / main / T-CON boards, smartphones, laptops, consoles, audio gear, appliances and general component-level troubleshooting, soldering and multimeter work.`,
+  codefox: `You are CODEFOX, the DIY Electronics embedded-systems expert. You help with microcontrollers (Arduino, ESP32, Raspberry Pi, STM32), firmware, and C/C++/Python code. Give complete, working code examples, debugging tips and exact wiring (pin to pin). Apply the same answer-first, one-question, "Next:" style; the step-by-step method applies to debugging hardware and code.`,
+  circuitbear: `You are CIRCUITBEAR, the DIY Electronics circuit-design expert. You help with circuit theory, calculations (show the formula and the numbers), PCB layout, power delivery and schematic analysis.`,
+  tutor: `You are a friendly, precise electrical and electronics engineering tutor inside the DIY Electronics study app. Teach step by step, show units in every calculation, use SI units and South African conventions where relevant (230/400 V, 50 Hz, SANS 10142-1). Keep answers focused (under about 250 words unless asked for more) with short Markdown headings, bullets and inline formulas. If a question involves live mains work, remind the student about safe isolation. If you are not sure of a fact, say so.`,
+  'phone-repair': `You are the DIY Electronics phone repair expert. Write practical, step-by-step troubleshooting and repair guides for smartphones. Include a "Required tools" section when relevant.`,
 };
 // Older clients used the persona id "sanwolf" for the main assistant.
 CHAT_PERSONAS.sanwolf = CHAT_PERSONAS.copilot;
 
 const MAX_CHAT_MESSAGE_CHARS = 4000;
-const MAX_CHAT_HISTORY_TURNS = 20;
+const MAX_CHAT_HISTORY_TURNS = 24;
+
+type ChatPrep = {
+  error?: string; status?: number;
+  contents?: any[]; instruction?: string; mode?: string; fast?: boolean; hasImages?: boolean;
+  cacheKey?: string | null; boardQuery?: string | null; lookupPromise?: Promise<any>;
+};
+
+// Answers to identical text-only questions (same mode, context and recent history) are reused.
+const chatAnswerCache = new Map<string, { at: number; reply: string }>();
+const CHAT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+function cacheGet(key?: string | null) {
+  if (!key) return null;
+  const hit = chatAnswerCache.get(key);
+  if (!hit || Date.now() - hit.at > CHAT_CACHE_TTL_MS) return null;
+  return hit.reply;
+}
+function cacheSet(key: string | null | undefined, reply: string) {
+  if (!key || !reply) return;
+  if (chatAnswerCache.size > 500) chatAnswerCache.delete(chatAnswerCache.keys().next().value as string);
+  chatAnswerCache.set(key, { at: Date.now(), reply });
+}
+
+/** Validates a chat request and builds the Gemini contents (shared by /api/chat and the streaming route). */
+export async function prepareChat(body: any): Promise<ChatPrep> {
+  const { history, mode } = body || {};
+  const message = typeof body?.message === 'string' ? body.message : '';
+  const current = sanitizeInlineImages(body?.images);
+  if (current.error) return { error: current.error, status: 400 };
+  if (!message.trim() && !current.images.length) return { error: 'Please type a question or attach a photo first.', status: 400 };
+  if (message.length > MAX_CHAT_MESSAGE_CHARS) return { error: `Please keep your question under ${MAX_CHAT_MESSAGE_CHARS} characters.`, status: 400 };
+  if (!getGeminiApiKey()) return { error: AI_NOT_CONFIGURED, status: 503 };
+
+  const persona = CHAT_PERSONAS[typeof mode === 'string' ? mode : ''] || CHAT_PERSONAS.copilot;
+  const isTutor = mode === 'tutor';
+  // Optional study context from the Theory pages (topic summary / formulas); plain text, capped.
+  const context = isTutor && typeof body?.context === 'string' ? body.context.slice(0, 1200) : '';
+  const instruction = isTutor
+    ? `${persona}${context ? `\n\nStudy context (from the app):\n${context}` : ''}\n\n${CHAT_SAFETY_RULES}`
+    : `${persona}\n\n${CHAT_METHOD}\n\n${CHAT_SAFETY_RULES}`;
+
+  let historyChars = current.images.reduce((n, i) => n + i.data.length, 0);
+  const maxTurns = isTutor ? 8 : MAX_CHAT_HISTORY_TURNS; // the tutor keeps a short context for speed
+  const rawHistory = Array.isArray(history)
+    ? history.filter((h: any) => h && (h.role === 'user' || h.role === 'model') && typeof h.text === 'string' && (h.text.trim() || Array.isArray(h.images))).slice(-maxTurns)
+    : [];
+  let historyImages = 0;
+  // Walk newest -> oldest so the most recent earlier photos are the ones kept when space runs out.
+  const safeHistory: any[] = [];
+  for (let i = rawHistory.length - 1; i >= 0; i--) {
+    const h = rawHistory[i];
+    const parts: any[] = [];
+    if (h.role === 'user' && Array.isArray(h.images) && h.images.length) {
+      const hist = sanitizeInlineImages(h.images.slice(0, 4));
+      const size = hist.images.reduce((n, x) => n + x.data.length, 0);
+      if (!hist.error && historyChars + size <= MAX_INLINE_TOTAL_CHARS) {
+        historyChars += size; historyImages += hist.images.length;
+        parts.push(...imageParts(hist.images));
+      } else {
+        parts.push({ text: `[The user attached ${h.images.length} photo(s) here earlier; no longer available.]` });
+      }
+    }
+    // Older model answers are trimmed: the model only needs the gist to keep context.
+    const maxLen = h.role === 'model' && i < rawHistory.length - 2 ? 1500 : MAX_CHAT_MESSAGE_CHARS;
+    if (h.text.trim()) parts.push({ text: h.text.slice(0, maxLen) });
+    if (parts.length) safeHistory.unshift({ role: h.role, parts });
+  }
+  while (safeHistory.length && safeHistory[0].role !== 'user') safeHistory.shift();
+
+  const boardQuery = typeof body?.boardQuery === 'string' && body.boardQuery.trim()
+    ? body.boardQuery.trim().slice(0, 80)
+    : (body?.lookupBoards === false || isTutor ? null : detectBoardQuery(message));
+  const lookupPromise = boardQuery ? lookupBoardOnline(boardQuery, 6000).catch(() => null) : Promise.resolve(null);
+  // Board evidence is useful but must not delay the first words: wait at most ~1.2 s for it.
+  const evidence = boardQuery ? await withTimeout(lookupPromise, 1200, null as any) : null;
+
+  const turnParts: any[] = [...imageParts(current.images)];
+  let text = message.trim() || 'Please look at the attached photo(s) and tell me what you see and what to check.';
+  if (evidence?.web?.length) text += `\n\n---\nWeb results found online for "${boardQuery}" (evidence; cite as [n] when used):\n${webEvidenceText(evidence.web)}`;
+  if (evidence?.photos?.length) text += `\n(${evidence.photos.length} real board photos from the web are shown to the user under your answer; they can pick one to map the circuit.)`;
+  turnParts.push({ text });
+  const contents = [...safeHistory, { role: 'user', parts: turnParts }];
+
+  const hasImages = current.images.length > 0 || historyImages > 0;
+  // Short, text-only questions (and every tutor question) go to the fastest models first.
+  const fast = isTutor || (!hasImages && message.length < 160 && rawHistory.length <= 6);
+  const cacheKey = hasImages ? null : crypto.createHash('sha256')
+    .update(JSON.stringify([mode || 'copilot', context, rawHistory.slice(-4).map((h: any) => [h.role, h.text]), message.trim().toLowerCase(), evidence?.web?.length || 0]))
+    .digest('hex');
+  return { contents, instruction, mode: isTutor ? 'tutor' : (mode || 'copilot'), fast, hasImages, cacheKey, boardQuery, lookupPromise };
+}
+
+async function boardPayload(prep: ChatPrep, waitMs: number) {
+  if (!prep.boardQuery || !prep.lookupPromise) return null;
+  const board = await withTimeout(prep.lookupPromise, waitMs, null as any);
+  return board && (board.photos.length || board.web.length) ? { query: prep.boardQuery, photos: board.photos, web: board.web, links: board.links } : null;
+}
 
 // API routes FIRST
 app.post("/api/chat", async (req, res) => {
-  const { message, history, mode } = req.body || {};
-
-  if (typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({ error: 'Please type a question first.' });
-  }
-  if (message.length > MAX_CHAT_MESSAGE_CHARS) {
-    return res.status(400).json({ error: `Please keep your question under ${MAX_CHAT_MESSAGE_CHARS} characters.` });
-  }
-
-  const persona = CHAT_PERSONAS[typeof mode === 'string' ? mode : ''] || CHAT_PERSONAS.copilot;
-  const instruction = `${persona}\n\n${CHAT_SAFETY_RULES}`;
-
-  const apiKey = getGeminiApiKey();
-  if (!apiKey) {
-    return res.status(503).json({ error: AI_NOT_CONFIGURED });
-  }
-
-  const safeHistory = Array.isArray(history)
-    ? history
-        .filter((h: any) => h && (h.role === 'user' || h.role === 'model') && typeof h.text === 'string' && h.text.trim())
-        .slice(-MAX_CHAT_HISTORY_TURNS)
-        .map((h: any) => ({ role: h.role, parts: [{ text: h.text.slice(0, MAX_CHAT_MESSAGE_CHARS) }] }))
-    : [];
-  const contents = [...safeHistory, { role: 'user', parts: [{ text: message.trim() }] }];
-
+  const startedAt = Date.now();
+  const prep = await prepareChat(req.body);
+  if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
+  const cached = cacheGet(prep.cacheKey);
+  if (cached) return res.json({ reply: cached, source: 'cache', board: await boardPayload(prep, 1500) });
   try {
-    const ai = makeGenAI(apiKey);
-    const reply = await callGeminiWithCascade(ai, contents, instruction, undefined);
+    const ai = makeGenAI(getGeminiApiKey());
+    const budget = Math.max(10000, 23500 - (Date.now() - startedAt));
+    const reply = prep.fast
+      ? await callGeminiWithCascade(ai, prep.contents, prep.instruction, undefined, { __models: orderModels(FAST_MODELS), __thinking: 'MINIMAL', __budgetMs: budget })
+          .catch(() => callGeminiWithCascade(ai, prep.contents, prep.instruction, undefined, { __budgetMs: Math.max(6000, 23500 - (Date.now() - startedAt)) }))
+      : await callGeminiSmart(ai, prep.contents, prep.instruction, { __budgetMs: budget });
     if (!reply) return res.status(503).json({ error: AI_UNAVAILABLE });
-    res.json({ reply, source: 'gemini' });
+    cacheSet(prep.cacheKey, reply);
+    res.json({ reply, source: 'gemini', board: await boardPayload(prep, Math.max(0, 26000 - (Date.now() - startedAt))) });
   } catch (error: any) {
     console.error("Gemini API Error in /api/chat:", error?.message || error);
     res.status(503).json({ error: AI_UNAVAILABLE });
   }
+});
+
+// ---- Streaming chat (first words in about a second) ----------------------------------------
+// Events are newline-delimited JSON: {"t":"text chunk"} ... then {"done":true,"board":...} or {"error":"..."}.
+// Served by netlify/functions/chat-stream.mts on Netlify (a streaming function; the Express
+// wrapper buffers) and by the Express route below locally.
+const FAST_MODELS = (process.env.GEMINI_FAST_MODELS || 'gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.1-flash-lite-preview,gemini-3.6-flash').split(',').map((m) => m.trim()).filter(Boolean);
+export type ChatStreamEvent = { t?: string; done?: boolean; board?: any; error?: string; model?: string; cached?: boolean; ttft?: number };
+
+export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEvent> {
+  const startedAt = Date.now();
+  const cached = cacheGet(prep.cacheKey);
+  if (cached) {
+    yield { t: cached, cached: true, ttft: 0 };
+    yield { done: true, board: await boardPayload(prep, 1500) };
+    return;
+  }
+  const ai = makeGenAI(getGeminiApiKey());
+  // Fast questions: lite models with minimal thinking. Others: the stronger models with LOW thinking,
+  // hedged to the lite models if no words have arrived after a couple of seconds.
+  const plan: { model: string; thinking: string }[] = prep.fast
+    ? orderModels(FAST_MODELS).map((m) => ({ model: m, thinking: 'MINIMAL' }))
+    : [...orderModels(SMART_MODELS).map((m) => ({ model: m, thinking: 'LOW' })), ...orderModels(FAST_MODELS).map((m) => ({ model: m, thinking: 'MINIMAL' }))];
+  const hedgeMs = prep.fast ? 1800 : 3000;
+  const deadline = startedAt + 24000;
+  const controllers: AbortController[] = [];
+  type Winner = { model: string; first: string; it: AsyncIterator<any>; ctrl: AbortController };
+
+  const open = async (step: { model: string; thinking: string }): Promise<Winner> => {
+    const ctrl = new AbortController();
+    controllers.push(ctrl);
+    const timer = setTimeout(() => ctrl.abort(), Math.max(1500, deadline - Date.now()));
+    const t0 = Date.now();
+    const run = async (thinking: string) => {
+      const config: any = { systemInstruction: prep.instruction, abortSignal: ctrl.signal, thinkingConfig: { thinkingLevel: thinking } };
+      const stream: any = await ai.models.generateContentStream({ model: step.model, contents: prep.contents, config });
+      const it: AsyncIterator<any> = stream[Symbol.asyncIterator]();
+      for (;;) {
+        const r = await it.next();
+        if (r.done) throw new Error(`${step.model} returned an empty answer`);
+        const text = r.value?.text;
+        if (text) return { model: step.model, first: text, it, ctrl };
+      }
+    };
+    try {
+      let w: Winner;
+      try { w = await run(step.thinking); }
+      catch (err: any) {
+        // Some models do not accept MINIMAL thinking: retry once with LOW.
+        if (step.thinking === 'MINIMAL' && /thinking/i.test(String(err?.message)) && !ctrl.signal.aborted) w = await run('LOW');
+        else throw err;
+      }
+      clearTimeout(timer);
+      modelHealth.set(step.model, { failUntil: 0, lastMs: Date.now() - t0 });
+      return w;
+    } catch (err: any) {
+      clearTimeout(timer);
+      const msg = String(err?.message || err);
+      if (!ctrl.signal.aborted) modelHealth.set(step.model, { failUntil: Date.now() + (/exceeded your current quota/i.test(msg) ? 10 : 2) * 60 * 1000, lastMs: Date.now() - t0 });
+      throw err;
+    }
+  };
+
+  const winner = await new Promise<Winner | null>((resolve) => {
+    let next = 0, running = 0, done = false, hedge: any = null;
+    const finish = (w: Winner | null) => {
+      if (done) { if (w) try { w.ctrl.abort(); } catch { /* ignore */ } return; }
+      done = true; clearTimeout(hedge);
+      for (const c of controllers) if (!w || c !== w.ctrl) try { c.abort(); } catch { /* ignore */ }
+      resolve(w);
+    };
+    const launch = () => {
+      if (done) return;
+      clearTimeout(hedge);
+      if (next >= plan.length || deadline - Date.now() < 2000) { if (running === 0) finish(null); return; }
+      const step = plan[next++];
+      running++;
+      open(step).then(finish, () => { running--; launch(); });
+      hedge = setTimeout(launch, hedgeMs);
+    };
+    launch();
+    if (prep.fast) launch(); // two fast models from the start: whichever speaks first wins
+    setTimeout(() => finish(null), deadline - Date.now() + 200);
+  });
+
+  if (!winner) { yield { error: AI_UNAVAILABLE }; return; }
+  let full = winner.first;
+  yield { t: winner.first, model: winner.model, ttft: Date.now() - startedAt };
+  try {
+    for (;;) {
+      const r = await winner.it.next();
+      if (r.done) break;
+      const text = r.value?.text;
+      if (text) { full += text; yield { t: text }; }
+      if (Date.now() > deadline + 4000) break;
+    }
+  } catch (err: any) {
+    console.warn('chat stream interrupted:', err?.message || err);
+  }
+  cacheSet(prep.cacheKey, full);
+  yield { done: true, board: await boardPayload(prep, 2500) };
+}
+
+app.get('/api/chat-stream', (req, res) => res.json({ ok: true, warm: true }));
+app.post('/api/chat-stream', async (req, res) => {
+  const prep = await prepareChat(req.body);
+  if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
+  res.status(200);
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  for await (const ev of streamChat(prep)) res.write(JSON.stringify(ev) + '\n');
+  res.end();
 });
 
 // Electrical Theory Exam Room: generate extra practice questions as JSON.
@@ -2819,6 +3082,255 @@ function universalHandler(kind: 'device' | 'component') {
 app.get('/api/universal/device', universalHandler('device'));
 app.get('/api/universal/component', universalHandler('component'));
 
+
+// ==== AI vision, board lookup and circuit mapping ==========================================
+// Images arrive as base64 inline parts (the browser compresses them to <=1600px JPEG and turns
+// videos into a handful of key frames), so everything stays inside Netlify's ~6 MB body limit
+// and the same hedged Gemini race (22 s budget) used by every AI route.
+const MAX_INLINE_IMAGES = 8;
+const MAX_INLINE_TOTAL_CHARS = 5_200_000; // base64 chars, keeps the JSON body under ~5.5 MB
+const INLINE_IMAGE_MIME = /^image\/(jpeg|png|webp|heic|heif)$/;
+
+type InlineImage = { mimeType: string; data: string; label?: string };
+
+/** Validates client images: whitelisted mime, base64 only, count + total size caps. */
+function sanitizeInlineImages(raw: any): { images: InlineImage[]; error?: string } {
+  if (raw == null) return { images: [] };
+  if (!Array.isArray(raw)) return { images: [], error: 'Images must be a list.' };
+  if (raw.length > MAX_INLINE_IMAGES) return { images: [], error: `Please attach at most ${MAX_INLINE_IMAGES} images.` };
+  let total = 0;
+  const images: InlineImage[] = [];
+  for (const img of raw) {
+    const mimeType = String(img?.mimeType || '').toLowerCase();
+    let data = String(img?.data || '');
+    const comma = data.indexOf(',');
+    if (data.startsWith('data:') && comma > 0) data = data.slice(comma + 1);
+    if (!INLINE_IMAGE_MIME.test(mimeType) || !data || !/^[A-Za-z0-9+/=\s]+$/.test(data.slice(0, 2000))) {
+      return { images: [], error: 'One of the attachments is not a supported image.' };
+    }
+    total += data.length;
+    images.push({ mimeType, data, label: typeof img?.label === 'string' ? img.label.slice(0, 80) : undefined });
+  }
+  if (total > MAX_INLINE_TOTAL_CHARS) return { images: [], error: 'The attachments are too large. Please send fewer or smaller photos.' };
+  return { images };
+}
+
+const imageParts = (images: InlineImage[]) => images.flatMap((img, i) => [
+  ...(img.label ? [{ text: `Image ${i + 1}: ${img.label}` }] : []),
+  { inlineData: { mimeType: img.mimeType, data: img.data } },
+]);
+
+/** Hosts the server will fetch images from on the user's behalf (board photo sources only). */
+const IMAGE_PROXY_HOSTS = /(^|\.)(upload\.wikimedia\.org|wikimedia\.org|wikipedia\.org|ifixit\.com|cdn\.ifixit\.com|ifixit-guide-images\.s3\.amazonaws\.com)$/i;
+const isProxyableImageUrl = (u: string) => {
+  try { const url = new URL(u); return url.protocol === 'https:' && IMAGE_PROXY_HOSTS.test(url.hostname); } catch { return false; }
+};
+async function fetchRemoteImage(u: string, timeoutMs = 6000): Promise<{ mimeType: string; buf: Buffer }> {
+  if (!isProxyableImageUrl(u)) throw new Error('image host not allowed');
+  const r = await fetch(u, { headers: { 'User-Agent': WEB_UA, Accept: 'image/*' }, signal: AbortSignal.timeout(timeoutMs), redirect: 'follow' });
+  if (!r.ok) throw new Error(`image ${r.status}`);
+  const mimeType = String(r.headers.get('content-type') || '').split(';')[0].toLowerCase();
+  if (!/^image\/(jpeg|png|webp|gif)$/.test(mimeType)) throw new Error('not an image');
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (buf.length > 4_000_000) throw new Error('image too large');
+  return { mimeType: mimeType === 'image/gif' ? 'image/png' : mimeType, buf };
+}
+
+// Same-origin image proxy so the browser can draw web board photos on a canvas (CORS) and so
+// remote images load even where the source blocks hotlinking. Allow-listed hosts only.
+app.get('/api/image-proxy', async (req, res) => {
+  const u = String(req.query.url || '');
+  if (!isProxyableImageUrl(u)) return res.status(400).json({ error: 'Image source not allowed.' });
+  try {
+    const { mimeType, buf } = await fetchRemoteImage(u, 8000);
+    res.set('Content-Type', mimeType);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buf);
+  } catch (e: any) {
+    res.status(502).json({ error: 'Could not load that image.' });
+  }
+});
+
+// ---- Board lookup: real photos + listings (board numbers, guides, schematic searches) ----
+const boardLookupCache = new Map<string, { at: number; body: any }>();
+const withTimeout = <T,>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+  Promise.race([p.catch(() => fallback), new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
+
+async function lookupBoardOnline(display: string, timeoutMs = 9000): Promise<{ query: string; photos: any[]; web: any[]; links: any[] }> {
+  const normalized = normalizeBoardQuery(display);
+  const hit = boardLookupCache.get(normalized);
+  if (hit && Date.now() - hit.at < BOARD_CACHE_TTL_MS) return hit.body;
+  const variants = boardQueryVariants(display);
+  const webP = withTimeout((async () => {
+    const c = boardWebCache.get(normalized);
+    if (c && Date.now() - c.at < BOARD_CACHE_TTL_MS) return c.results;
+    const r = await searchBoardWeb(display);
+    if (r.length) boardWebCache.set(normalized, { at: Date.now(), results: r });
+    return r;
+  })(), timeoutMs, [] as any[]);
+  // Commons is strict about relevance, so also try the shorter variants ("Samsung UA43 board").
+  const commonsP = withTimeout((async () => {
+    const seen = new Set<string>();
+    const out: any[] = [];
+    const lists = await Promise.allSettled(variants.slice(0, 3).map((v) => searchCommonsBoardPhotos(v)));
+    for (const l of lists) if (l.status === 'fulfilled') for (const p of l.value) if (!seen.has(p.url)) { seen.add(p.url); out.push(p); }
+    return out;
+  })(), timeoutMs, [] as any[]);
+  const [web, commons] = await Promise.all([webP, commonsP]);
+  const photos = [
+    ...commons.slice(0, 10).map((p: any) => ({
+      title: p.title, thumbUrl: p.thumbUrl, url: p.thumbUrl || p.url, fullUrl: p.url, pageUrl: p.pageUrl,
+      source: 'Wikimedia Commons', credit: `${p.artist} · ${p.license}`, licenseUrl: p.licenseUrl,
+    })),
+    ...web.filter((w: any) => typeof w.image === 'string' && /^https:\/\//.test(w.image)).slice(0, 10).map((w: any) => ({
+      title: w.title, thumbUrl: w.image, url: w.image, fullUrl: w.image, pageUrl: w.url,
+      source: w.source || 'iFixit', credit: `${w.source || 'iFixit'} · ${w.kind}`, licenseUrl: null,
+    })),
+  ].filter((p) => isProxyableImageUrl(p.url)).slice(0, 16);
+  const body = {
+    query: display,
+    photos,
+    web: web.slice(0, 10).map((w: any) => ({ title: w.title, url: w.url, snippet: w.snippet, kind: w.kind, source: w.source })),
+    links: buildBoardReferenceLinks(display).filter((l) => l.kind !== 'shop').slice(0, 7),
+  };
+  if (web.length || photos.length) {
+    if (boardLookupCache.size > 2000) boardLookupCache.clear();
+    boardLookupCache.set(normalized, { at: Date.now(), body });
+  }
+  return body;
+}
+
+/** Spots a board number / model in a chat message ("UA43TU7000", "BN41-02703A", "Samsung UA43"). */
+function detectBoardQuery(message: string): string | null {
+  const text = message.replace(/\s+/g, ' ').trim();
+  const code = text.match(/\b(?=[A-Z0-9._-]*\d)(?=[A-Z0-9._-]*[A-Z])[A-Z0-9][A-Z0-9._-]{3,}[A-Z0-9]\b/i);
+  if (!code) return null;
+  const token = code[0];
+  if (/^\d+(\.\d+)?(v|a|w|mah|ma|mm|hz|khz|mhz|ghz|uf|nf|pf|k|m|ohm|r)$/i.test(token)) return null; // values, not boards
+  if (/^(rs|usd|zar|r)\d+$/i.test(token)) return null;
+  const brand = text.match(/\b(samsung|lg|sony|hisense|tcl|sinotec|philips|panasonic|toshiba|sharp|skyworth|vestel|xiaomi|huawei|apple|iphone|macbook|dell|hp|lenovo|asus|acer|msi|nintendo|playstation|ps[345]|xbox|oppo|vivo|tecno|infinix|itel|nokia|motorola|defy|jvc|telefunken|bosch|whirlpool|defy)\b/i);
+  const q = brand && !token.toLowerCase().includes(brand[0].toLowerCase()) ? `${brand[0]} ${token}` : token;
+  return q.slice(0, 80);
+}
+
+app.get('/api/board-lookup', async (req, res) => {
+  const display = String(req.query.q || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (display.length < 2) return res.status(400).json({ error: 'Enter a board or model number.' });
+  const rate = boardRateCheck(req, false);
+  if (!rate.ok) { res.setHeader('Retry-After', String(rate.retryAfter)); return res.status(429).json({ error: 'Too many lookups. Please wait a few minutes.' }); }
+  const body = await lookupBoardOnline(display, 12000);
+  res.set('Cache-Control', 'public, max-age=3600');
+  res.json(body);
+});
+
+const webEvidenceText = (web: any[]) => web.slice(0, 8).map((w, i) => `[${i + 1}] ${w.title} (${w.source}, ${w.kind}) ${w.url}\n    ${w.snippet || ''}`).join('\n');
+
+// ---- Circuit map --------------------------------------------------------------------------
+const CIRCUIT_BLOCK_TYPES = ['input', 'protection', 'rectifier', 'pfc', 'smps', 'standby', 'regulator', 'soc', 'memory', 'storage', 'backlight', 'display', 'audio', 'io', 'rf', 'sensor', 'battery', 'charger', 'motor', 'other'];
+const CIRCUIT_EDGE_KINDS = ['power', 'signal', 'data', 'control', 'ground'];
+
+const CIRCUIT_MAP_PROMPT = (opts: { board: string; hasPhoto: boolean; symptom: string; evidence: string }) => `You are an expert electronics repair technician. Map the circuit of ${opts.hasPhoto ? 'the circuit board in the attached photo' : `the board / device "${opts.board}"`}${opts.hasPhoto && opts.board ? ` (the user says it is "${opts.board}")` : ''}.
+${opts.symptom ? `Reported fault / symptom: "${opts.symptom}".` : 'No fault was described: mark the parts that most commonly fail on this kind of board as the ones to check.'}
+Break the board into functional sections (power input, protection/fuse, rectifier, PFC, main SMPS, standby supply, DC-DC regulators, main SoC, memory, backlight/LED driver, audio amp, I/O connectors, etc. as relevant), show how electricity flows through it, and choose the specific components a technician should check.
+${opts.hasPhoto ? `Use ONLY what is visible in the photo for positions. For every block and component you can see, give "box_2d": [ymin, xmin, ymax, xmax] normalised to 0-1000 over the whole image (Gemini bounding-box format). Use null when you cannot locate it in the photo. Read printed reference designators (C12, Q3, U1...) and part markings when legible.` : 'There is no photo: set every "box_2d" to null.'}
+Return ONLY a JSON object, no prose, in exactly this shape:
+{
+ "title": string,                       // e.g. "Samsung UA43 main board + PSU"
+ "boardType": string,                   // e.g. "LED TV power supply / main board"
+ "confidence": "low"|"medium"|"high",
+ "summary": string,                     // 2-3 sentences: what the board does and how power flows
+ "blocks": [{"id": string, "label": string, "type": one of ${JSON.stringify(CIRCUIT_BLOCK_TYPES)}, "description": string, "voltageIn": string|null, "voltageOut": string|null, "keyParts": string[], "box_2d": [number,number,number,number]|null}],
+ "connections": [{"from": blockId, "to": blockId, "kind": one of ${JSON.stringify(CIRCUIT_EDGE_KINDS)}, "label": string, "voltage": string|null}],
+ "powerFlow": blockId[],                // the main power path in order, e.g. input -> fuse -> bridge -> PFC -> SMPS -> rails -> regulators -> loads
+ "components": [{"id": string, "ref": string, "label": string, "type": string, "blockId": blockId, "box_2d": [number,number,number,number]|null, "check": boolean, "priority": 1|2|3, "reason": string, "measure": string, "expected": string, "howToTest": string}],
+ "testPoints": [{"label": string, "blockId": blockId, "expected": string, "how": string}],
+ "failurePoints": [{"component": string, "symptom": string, "blockId": blockId}],
+ "safety": string
+}
+Rules: 5-14 blocks, 4-16 components, 2-8 of them with "check": true (the suspects / parts to test first; priority 1 = test first). Every connection and component must reference a real block id. "measure" says what to measure and with which meter mode (e.g. "ESR / capacitance out of circuit, or DC volts across it powered"), "expected" gives typical values with units. Typical voltages are fine; never invent exact part numbers you cannot read or do not know (use a generic label like "Main filter capacitor" instead). Keep every string short (under 160 characters).${opts.evidence ? `\n\nWeb results found online for this board (use as evidence for board numbers, ICs and known faults):\n${opts.evidence}` : ''}`;
+
+const clampBox = (b: any): [number, number, number, number] | null => {
+  if (!Array.isArray(b) || b.length !== 4) return null;
+  const n = b.map((x: any) => Math.max(0, Math.min(1000, Math.round(Number(x)))));
+  if (n.some((x) => !Number.isFinite(x))) return null;
+  let [y0, x0, y1, x1] = n;
+  if (y1 < y0) [y0, y1] = [y1, y0];
+  if (x1 < x0) [x0, x1] = [x1, x0];
+  if (y1 - y0 < 4 || x1 - x0 < 4) return null;
+  return [y0, x0, y1, x1];
+};
+const s = (v: any, max = 160) => (typeof v === 'string' ? v.trim().slice(0, max) : v == null ? '' : String(v).slice(0, max));
+
+function sanitizeCircuitMap(raw: any, hasPhoto: boolean) {
+  const blocks = (Array.isArray(raw?.blocks) ? raw.blocks : []).filter((b: any) => b && b.id && b.label).slice(0, 16).map((b: any) => ({
+    id: s(b.id, 40), label: s(b.label, 60),
+    type: CIRCUIT_BLOCK_TYPES.includes(b.type) ? b.type : 'other',
+    description: s(b.description, 240), voltageIn: s(b.voltageIn, 60) || null, voltageOut: s(b.voltageOut, 60) || null,
+    keyParts: strArr(b.keyParts, 8, 60), box_2d: hasPhoto ? clampBox(b.box_2d) : null,
+  }));
+  const ids = new Set(blocks.map((b: any) => b.id));
+  const connections = (Array.isArray(raw?.connections) ? raw.connections : [])
+    .filter((c: any) => c && ids.has(c.from) && ids.has(c.to) && c.from !== c.to).slice(0, 30)
+    .map((c: any) => ({ from: c.from, to: c.to, kind: CIRCUIT_EDGE_KINDS.includes(c.kind) ? c.kind : 'signal', label: s(c.label, 60), voltage: s(c.voltage, 40) || null }));
+  const powerFlow = (Array.isArray(raw?.powerFlow) ? raw.powerFlow : []).filter((id: any) => ids.has(id))
+    .filter((id: any, i: number, a: any[]) => a.indexOf(id) === i).slice(0, 16);
+  const components = (Array.isArray(raw?.components) ? raw.components : []).filter((c: any) => c && (c.label || c.ref)).slice(0, 20).map((c: any, i: number) => ({
+    id: s(c.id, 40) || `c${i + 1}`, ref: s(c.ref, 30), label: s(c.label, 80) || s(c.ref, 30), type: s(c.type, 40),
+    blockId: ids.has(c.blockId) ? c.blockId : null, box_2d: hasPhoto ? clampBox(c.box_2d) : null,
+    check: c.check === true || c.suspect === true, priority: [1, 2, 3].includes(Number(c.priority)) ? Number(c.priority) : 2,
+    reason: s(c.reason, 240), measure: s(c.measure, 240), expected: s(c.expected, 200), howToTest: s(c.howToTest, 300),
+  }));
+  return {
+    title: s(raw?.title, 100) || 'Circuit map', boardType: s(raw?.boardType, 100),
+    confidence: ['low', 'medium', 'high'].includes(raw?.confidence) ? raw.confidence : 'low',
+    summary: s(raw?.summary, 500), blocks, connections, powerFlow, components,
+    testPoints: (Array.isArray(raw?.testPoints) ? raw.testPoints : []).slice(0, 12).map((t: any) => ({ label: s(t?.label, 80), blockId: ids.has(t?.blockId) ? t.blockId : null, expected: s(t?.expected, 120), how: s(t?.how, 200) })).filter((t: any) => t.label),
+    failurePoints: (Array.isArray(raw?.failurePoints) ? raw.failurePoints : []).slice(0, 10).map((f: any) => ({ component: s(f?.component, 80), symptom: s(f?.symptom, 160), blockId: ids.has(f?.blockId) ? f.blockId : null })).filter((f: any) => f.component),
+    safety: s(raw?.safety, 400) || 'Unplug the device and discharge the large primary capacitor before touching the power section. Mains-side parts can hold lethal voltage.',
+  };
+}
+
+app.post('/api/circuit-map', async (req, res) => {
+  const startedAt = Date.now();
+  const board = s(req.body?.board, 80);
+  const symptom = s(req.body?.symptom, 400);
+  const imageUrl = typeof req.body?.imageUrl === 'string' ? req.body.imageUrl : '';
+  const { images, error } = sanitizeInlineImages(req.body?.image ? [req.body.image] : req.body?.images);
+  if (error) return res.status(400).json({ error });
+  if (imageUrl && !isProxyableImageUrl(imageUrl)) return res.status(400).json({ error: 'That image source is not supported.' });
+  if (!board && !images.length && !imageUrl) return res.status(400).json({ error: 'Send a board photo or type a board / model number.' });
+  const ai = getGeminiClient();
+  if (!ai) return res.status(503).json({ error: AI_NOT_CONFIGURED });
+
+  // In parallel: fetch the chosen web photo server-side, and gather web evidence for the board number.
+  const [remote, lookup] = await Promise.all([
+    imageUrl ? fetchRemoteImage(imageUrl, 6000).catch(() => null) : Promise.resolve(null),
+    board ? withTimeout(lookupBoardOnline(board, 3500), 4000, null as any) : Promise.resolve(null),
+  ]);
+  if (imageUrl && !remote) return res.status(502).json({ error: 'Could not download that board photo. Pick another one.' });
+  const photo: InlineImage | null = images[0] || (remote ? { mimeType: remote.mimeType, data: remote.buf.toString('base64') } : null);
+  const prompt = CIRCUIT_MAP_PROMPT({ board, hasPhoto: !!photo, symptom, evidence: lookup?.web?.length ? webEvidenceText(lookup.web) : '' });
+  const parts: any[] = [];
+  if (photo) parts.push({ inlineData: { mimeType: photo.mimeType, data: photo.data } });
+  parts.push({ text: prompt });
+  try {
+    const budget = Math.max(8000, 25000 - (Date.now() - startedAt));
+    const text = await callGeminiSmart(ai, [{ role: 'user', parts }], undefined, { responseMimeType: 'application/json', __budgetMs: budget });
+    const parsed = parseJsonLoose(text);
+    if (!parsed || !Array.isArray(parsed.blocks) || !parsed.blocks.length) return res.status(503).json({ error: 'The AI could not map this board just now. Please try again.' });
+    const map = sanitizeCircuitMap(parsed, !!photo);
+    res.json({
+      map, hasPhoto: !!photo, board,
+      photoSource: remote ? imageUrl : null,
+      board_lookup: lookup ? { photos: lookup.photos, web: lookup.web, links: lookup.links } : null,
+      disclaimer: 'AI-generated and approximate. Positions, values and suspects are estimates: confirm with the schematic / service manual and your meter before replacing parts.',
+      ms: Date.now() - startedAt,
+    });
+  } catch (e: any) {
+    console.error('circuit-map failed:', e?.message || e);
+    res.status(503).json({ error: AI_UNAVAILABLE });
+  }
+});
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });

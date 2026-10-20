@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BookOpenCheck, GraduationCap, Timer, Gauge, Award } from 'lucide-react';
+import { lazy, Suspense } from 'react';
+import { BookOpenCheck, BookOpen, GraduationCap, Timer, Gauge, Award } from 'lucide-react';
 import { RouteLink } from '../../hooks/usePathname';
 import type { ThemeConfig } from '../../lib/theme';
 import TheoryLibrary from './TheoryLibrary';
 import ExamRoom from './ExamRoom';
 import Courses from '../Courses';
+const TheoryBook = lazy(() => import('./TheoryBook'));
 import type { Course } from '../../types';
+import { THEORY_SUBJECTS } from '../../data/theory';
+import type { TheorySubjectId } from '../../data/theory';
 
 /**
  * Theory & Courses hub (the single learning section): Theory library | Exam Room | Courses.
@@ -17,22 +21,24 @@ import type { Course } from '../../types';
  *   #/theory/courses        -> Certified courses
  * The hash is self-contained so it coexists with any path-based router.
  */
-export type TheoryRoute = { tab: 'library' | 'exam' | 'courses'; topicId?: string };
+export type TheoryRoute = { tab: 'library' | 'exam' | 'courses' | 'book'; topicId?: string; subject?: string };
 
 export const THEORY_HASH_PREFIX = '#/theory';
 
 export function parseTheoryHash(hash: string): TheoryRoute | null {
   if (!hash.startsWith(THEORY_HASH_PREFIX)) return null;
   const parts = hash.slice(THEORY_HASH_PREFIX.length).split('/').filter(Boolean);
-  if (parts[0] === 'exam') return { tab: 'exam' };
+  if (parts[0] === 'exam') return parts[1] ? { tab: 'exam', subject: decodeURIComponent(parts[1]) } : { tab: 'exam' };
   if (parts[0] === 'courses') return { tab: 'courses' };
+  if (parts[0] === 'book') return parts[1] ? { tab: 'book', topicId: decodeURIComponent(parts[1]) } : { tab: 'book' };
   if (parts[0] === 'topic' && parts[1]) return { tab: 'library', topicId: decodeURIComponent(parts[1]) };
   return { tab: 'library' };
 }
 
 export function buildTheoryHash(route: TheoryRoute): string {
-  if (route.tab === 'exam') return `${THEORY_HASH_PREFIX}/exam`;
+  if (route.tab === 'exam') return route.subject ? `${THEORY_HASH_PREFIX}/exam/${encodeURIComponent(route.subject)}` : `${THEORY_HASH_PREFIX}/exam`;
   if (route.tab === 'courses') return `${THEORY_HASH_PREFIX}/courses`;
+  if (route.tab === 'book') return route.topicId ? `${THEORY_HASH_PREFIX}/book/${encodeURIComponent(route.topicId)}` : `${THEORY_HASH_PREFIX}/book`;
   if (route.topicId) return `${THEORY_HASH_PREFIX}/topic/${encodeURIComponent(route.topicId)}`;
   return THEORY_HASH_PREFIX;
 }
@@ -70,6 +76,7 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
   const primary = themeConfig?.primaryBg || 'bg-gradient-to-r from-indigo-600 to-violet-500';
   const tabs = [
     { id: 'library' as const, label: 'Theory', icon: BookOpenCheck, hint: 'A–Z study library' },
+    { id: 'book' as const, label: 'Read as book', icon: BookOpen, hint: 'Chapters, glossary, find' },
     { id: 'exam' as const, label: 'Exam Room', icon: Timer, hint: 'Practice exams' },
     { id: 'courses' as const, label: 'Courses', icon: Award, hint: 'Certified courses' },
   ];
@@ -118,17 +125,23 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
         </RouteLink>
       </div>
 
-      {route.tab === 'library' && (
+      {route.tab === 'book' && (
+        <Suspense fallback={<div className="fixed inset-0 z-[70] bg-slate-950 flex items-center justify-center text-sm text-slate-400">Opening the book…</div>}>
+          <TheoryBook startTopicId={route.topicId} onClose={() => navigate({ tab: 'library' })} onTakeQuiz={subject => navigate({ tab: 'exam', subject })} />
+        </Suspense>
+      )}
+      {(route.tab === 'library' || route.tab === 'book') && (
         <TheoryLibrary
-          topicId={route.topicId}
+          topicId={route.tab === 'library' ? route.topicId : undefined}
           onOpenTopic={id => navigate({ tab: 'library', topicId: id })}
           onCloseTopic={() => navigate({ tab: 'library' })}
           onStartExam={() => navigate({ tab: 'exam' })}
+          onReadInBook={id => navigate({ tab: 'book', topicId: id })}
           primaryClass={primary}
         />
       )}
       {route.tab === 'exam' && (
-        <ExamRoom onStudyTopic={id => navigate({ tab: 'library', topicId: id })} primaryClass={primary} />
+        <ExamRoom key={route.subject || 'all'} initialSubject={THEORY_SUBJECTS.some(s => s.id === route.subject) ? route.subject as TheorySubjectId : undefined} onStudyTopic={id => navigate({ tab: 'library', topicId: id })} primaryClass={primary} />
       )}
       {route.tab === 'courses' && (
         <Courses courses={courses} onCourseComplete={(id, title) => onCourseComplete?.(id, title)} embedded />

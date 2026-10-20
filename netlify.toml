@@ -18,6 +18,13 @@
   node_bundler = "esbuild"
   external_node_modules = ["vite"]
 
+# Streaming AI chat (a Netlify Functions v2 streaming function). Must come before the /api/* rule.
+[[redirects]]
+  from = "/api/chat-stream"
+  to = "/.netlify/functions/chat-stream"
+  status = 200
+  force = true
+
 # Send API calls to the serverless Express app
 [[redirects]]
   from = "/api/*"

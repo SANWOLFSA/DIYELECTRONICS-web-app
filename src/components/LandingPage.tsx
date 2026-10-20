@@ -65,7 +65,9 @@ export default function LandingPage({
 
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-6 sm:py-10">
         <div className="w-full max-w-md">
-          <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-white/60 dark:border-slate-800 p-6 sm:p-8 rounded-3xl shadow-2xl shadow-black/30">
+          {/* Frosted, see-through panel so the background picture shows through. The "dark" class makes the
+              form inside use its light-on-dark styles (white text) regardless of the app theme. */}
+          <div className="dark bg-black/30 backdrop-blur-md border border-white/20 p-6 sm:p-8 rounded-3xl shadow-2xl shadow-black/30 text-white [text-shadow:0_1px_2px_rgb(0_0_0/0.45)]">
             <div className="flex justify-center mb-4">
               <div className="w-12 h-12 rounded-xl bg-slate-950 dark:bg-white flex items-center justify-center shadow-md">
                 <Wrench className="w-6 h-6 text-white dark:text-slate-950" />
