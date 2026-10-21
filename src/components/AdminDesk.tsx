@@ -58,8 +58,9 @@ import {
 import UserManagement from './UserManagement';
 import SearchAnalytics from './SearchAnalytics';
 import VideoModeration from './catalog/VideoModeration';
+import { AdminOrdersView } from './MarketplaceOrders';
 
-type AdminTab = 'verifications' | 'shops' | 'listings' | 'videos' | 'hub' | 'audit' | 'users' | 'search';
+type AdminTab = 'verifications' | 'shops' | 'orders' | 'listings' | 'videos' | 'hub' | 'audit' | 'users' | 'search';
 
 const cardCls = 'bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm shadow-slate-200/50 dark:shadow-none';
 const inputCls =
@@ -114,6 +115,7 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
   const tabs: { id: AdminTab; label: string }[] = [
     { id: 'verifications', label: 'Verifications' },
     { id: 'shops', label: 'Shops' },
+    { id: 'orders', label: 'Orders' },
     { id: 'listings', label: 'Listings' },
     { id: 'videos', label: 'Videos' },
     { id: 'hub', label: 'Repair hub' },
@@ -125,6 +127,7 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
   const titles: Record<AdminTab, [string, string]> = {
     verifications: ['Seller verification queue', 'Open each company document, tick the checklist, then approve, reject with a reason, or revoke a badge. Every action is written to the audit log.'],
     shops: ['Shops & suppliers', 'Every registered shop with its Business plan status (USD $20/month, set by hand; no payments in the app) and open reports. Suspend a shop (hides it and takes its listings down), restore it, or revoke its Verified badge. Every action is written to the audit log.'],
+    orders: ['Orders & receipts', 'Every Marketplace order with its receipt: items, prices, delivery fee, total, payment method, payment reference and status history. Receipts can\'t be edited; you can add a note (it goes in the audit log).'],
     listings: ['Listing moderation', 'Listings from individuals and unverified companies wait here until approved. Remove anything that breaks the rules.'],
     videos: ['Community video moderation', 'Reported videos appear first. Remove (hide) a video, restore it, or delete it permanently. Every action is written to the audit log.'],
     hub: ['Repair hub moderation', 'Approve or remove community device pages, AI-researched component pages, guides and Answers, and work through device requests. Every action is written to the audit log.'],
@@ -173,12 +176,14 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
         </div>
       )}
 
-      {!isFirebaseConfigured && (tab === 'verifications' || tab === 'shops' || tab === 'listings' || tab === 'videos' || tab === 'hub' || tab === 'audit') ? (
+      {!isFirebaseConfigured && (tab === 'verifications' || tab === 'shops' || tab === 'orders' || tab === 'listings' || tab === 'videos' || tab === 'hub' || tab === 'audit') ? (
         <Empty icon={AlertTriangle} title="Cloud database not configured" body="Add the VITE_FIREBASE_* settings to this build to review verifications, moderate listings and read the audit log." />
       ) : tab === 'verifications' ? (
         <VerificationQueue actor={actor} />
       ) : tab === 'shops' ? (
         <ShopsModeration actor={actor} />
+      ) : tab === 'orders' ? (
+        <AdminOrdersView actor={actor} />
       ) : tab === 'listings' ? (
         <ListingModeration actor={actor} />
       ) : tab === 'videos' ? (

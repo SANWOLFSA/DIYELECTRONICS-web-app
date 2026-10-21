@@ -155,7 +155,18 @@ export interface ShopFields {
   phone?: string;
   whatsapp?: string;
   email?: string;
+  /** "We deliver" (true) / "We don't deliver" (false). */
   delivery?: boolean;
+  /** Flat once-off delivery fee in the shop currency (only when delivery is on). */
+  deliveryFee?: number;
+  /** Optional max distance in km for local delivery (null = no limit). */
+  deliveryMaxKm?: number | null;
+  /** Payment methods the shop accepts for in-app orders: 'card' (Visa / Mastercard via PayPal guest checkout), 'paypal', 'bank'. */
+  payMethods?: string[];
+  /** Shop's own PayPal email (PayPal "Buy Now" page; also allows card payments). */
+  paypalEmail?: string;
+  /** Shop's own PayPal.me link, e.g. https://paypal.me/cityspares. */
+  paypalMe?: string;
   /** Ships to other countries (e.g. an overseas supplier). */
   shipsInternationally?: boolean;
   /** Country codes it ships to, or ['WORLDWIDE']. */
@@ -481,7 +492,12 @@ export async function saveSellerProfile(uid: string, profile: Omit<SellerProfile
     if ((profile.whatsapp || '').trim() && !whatsapp) throw new Error('Type the WhatsApp number in international format with the country code, e.g. +234 803 123 4567.');
     profile = { ...profile, phone, whatsapp };
     if (!/^[A-Z]{2}$/.test(profile.country || '')) throw new Error('Choose the country the shop is in.');
-    if (profile.shipsInternationally && !(profile.shipsTo || []).length) throw new Error('Add at least one country you ship to, or choose Worldwide.');
+    const pm = profile.payMethods || [];
+    const ppEmail = t(profile.paypalEmail, 160);
+    if (ppEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ppEmail)) throw new Error('Check the PayPal email address.');
+    if (pm.includes('card') && !ppEmail) throw new Error('To take Visa / Mastercard cards, add your PayPal email. Card payments go through PayPal.');
+    if (pm.includes('paypal') && !ppEmail && !t(profile.paypalMe, 100)) throw new Error('To take PayPal, add your PayPal email or your PayPal.me link.');
+    if (profile.delivery && profile.shipsInternationally && !(profile.shipsTo || []).length) throw new Error('Add at least one country you ship to, or choose Worldwide.');
     if (t(profile.address, 300).length < 6 || !t(profile.town, 80)) throw new Error('Add the street address and town / city so customers can find the shop.');
     Object.assign(data, {
       logoUrl: t(profile.logoUrl, 2000), logoPath: t(profile.logoPath, 400),
@@ -491,8 +507,13 @@ export async function saveSellerProfile(uid: string, profile: Omit<SellerProfile
       lat: num(profile.lat, 90), lng: num(profile.lng, 180),
       hours: t(profile.hours, 200), phone: t(profile.phone, 30), whatsapp: t(profile.whatsapp, 30), email: t(profile.email, 160),
       delivery: !!profile.delivery,
-      shipsInternationally: !!profile.shipsInternationally,
-      shipsTo: profile.shipsInternationally ? (profile.shipsTo?.length ? profile.shipsTo : ['WORLDWIDE']).filter(c => c === 'WORLDWIDE' || /^[A-Z]{2}$/.test(c)).slice(0, 60) : [],
+      deliveryFee: profile.delivery && typeof profile.deliveryFee === 'number' && Number.isFinite(profile.deliveryFee) ? Math.min(1000000, Math.max(0, Math.round(profile.deliveryFee * 100) / 100)) : 0,
+      deliveryMaxKm: profile.delivery && typeof profile.deliveryMaxKm === 'number' && profile.deliveryMaxKm > 0 ? Math.min(20000, Math.round(profile.deliveryMaxKm)) : null,
+      payMethods: (profile.payMethods || []).filter((m, i, a) => ['card', 'paypal', 'bank'].includes(m) && a.indexOf(m) === i),
+      paypalEmail: t(profile.paypalEmail, 160),
+      paypalMe: t(profile.paypalMe, 100),
+      shipsInternationally: !!profile.delivery && !!profile.shipsInternationally,
+      shipsTo: profile.delivery && profile.shipsInternationally ? (profile.shipsTo?.length ? profile.shipsTo : ['WORLDWIDE']).filter(c => c === 'WORLDWIDE' || /^[A-Z]{2}$/.test(c)).slice(0, 60) : [],
       stockType: profile.stockType && ['new', 'used', 'both'].includes(profile.stockType) ? profile.stockType : 'both',
       registrationNumber: t(profile.registrationNumber, 40),
     });

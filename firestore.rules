@@ -12,7 +12,8 @@ rules_version = '2';
 //   3. Existing per-user collections (files, metadata, saved devices)
 //   4. App content & analytics (searchLogs, repairTricks, blueprints, devices)
 //   5. Marketplace: sellers, seller verification, verified badge, listings,
-//      purchase requests, reviews, admin audit log
+//      purchase requests, reviews, admin audit log, orders, receipts,
+//      shop bank details
 //   6. Community repair videos (communityVideos, helpful marks, videoReports)
 //   7. Repair hub: guides, guideCompletions, guideComments, questions, answers,
 //      questionVotes, answerVotes, discoveredDevices, discoveredComponents,
@@ -206,7 +207,8 @@ service cloud.firestore {
         return ['uid', 'displayName', 'sellerType', 'location', 'bio', 'createdAt', 'updatedAt',
                 'isShop', 'logoUrl', 'logoPath', 'shopfrontUrl', 'shopfrontPath', 'address', 'town',
                 'province', 'country', 'currency', 'lat', 'lng', 'hours', 'phone', 'whatsapp', 'email',
-                'delivery', 'shipsInternationally', 'shipsTo', 'stockType', 'registrationNumber'];
+                'delivery', 'shipsInternationally', 'shipsTo', 'stockType', 'registrationNumber',
+                'deliveryFee', 'deliveryMaxKm', 'payMethods', 'paypalEmail', 'paypalMe'];
       }
 
       function adminKeys() {
@@ -232,6 +234,16 @@ service cloud.firestore {
           && optString(d, 'email', 160) && optString(d, 'registrationNumber', 40)
           && (!('delivery' in d) || d.delivery is bool)
           && (!('stockType' in d) || d.stockType in ['new', 'used', 'both'])
+          // Ordering: delivery fee (shop currency), optional max km, accepted payment methods.
+          && (!('deliveryFee' in d) || ((d.deliveryFee is int || d.deliveryFee is float) && d.deliveryFee >= 0 && d.deliveryFee <= 1000000))
+          && (!('deliveryMaxKm' in d) || d.deliveryMaxKm == null || ((d.deliveryMaxKm is int || d.deliveryMaxKm is float) && d.deliveryMaxKm > 0 && d.deliveryMaxKm <= 20000))
+          && (!('payMethods' in d) || (d.payMethods is list && d.payMethods.size() <= 3 && d.payMethods.hasOnly(['card', 'paypal', 'bank'])))
+          && optString(d, 'paypalEmail', 160) && optString(d, 'paypalMe', 100)
+          && (!('paypalMe' in d) || d.paypalMe == '' || d.paypalMe.matches('^https://paypal[.]me/[A-Za-z0-9_.-]{1,60}$'))
+          // Card payments go through PayPal guest checkout: they need the shop's PayPal email.
+          && (!('card' in d.get('payMethods', [])) || d.get('paypalEmail', '').size() > 3)
+          && (!('paypal' in d.get('payMethods', [])) || d.get('paypalEmail', '').size() > 3 || d.get('paypalMe', '').size() > 0)
+          && (!('bank' in d.get('payMethods', [])) || exists(/databases/$(database)/documents/shopBankDetails/$(uid)))
           // Phone numbers are stored in international E.164 format (+ country code).
           && (!('phone' in d) || d.phone == '' || d.phone.matches('^[+][1-9][0-9]{6,14}$'))
           && (!('whatsapp' in d) || d.whatsapp == '' || d.whatsapp.matches('^[+][1-9][0-9]{6,14}$'))
@@ -490,6 +502,248 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/purchaseRequests/$(requestId)).data.status in ['accepted', 'completed'];
       allow update: if false;
       allow delete: if isAdmin();
+    }
+
+    // --- 5h. Orders (buyer checkout inside the Marketplace) --------------
+    // Buyer creates the order + its receipt (+ bank marker) in ONE batch.
+    // Prices are checked against the listing and the shop profile.
+    // Status moves forward only; the receipt gets a matching history entry
+    // in the same batch. The optional customs ID must be cleared when the
+    // order is received / collected or cancelled. No card data, ever.
+    function statusRank(s) {
+      return {'placed': 0, 'accepted': 1, 'paid': 2, 'sent': 3, 'collected': 4, 'cancelled': 9}[s];
+    }
+
+    function isNum(v) {
+      return v is int || v is float;
+    }
+
+    // Money compared to the cent (client rounds to 2 decimals).
+    function near(a, b) {
+      return isNum(a) && a >= b - 0.011 && a <= b + 0.011;
+    }
+
+    function recentTs(t) {
+      return t is timestamp
+        && t > request.time - duration.value(10, 'm')
+        && t < request.time + duration.value(10, 'm');
+    }
+
+    match /orders/{orderId} {
+      function orderKeys() {
+        return ['orderNumber', 'buyerUid', 'buyerName', 'buyerPhone', 'shopUid', 'shopName',
+                'listingId', 'listingTitle', 'listingImage', 'qty', 'unitPrice', 'itemsTotal',
+                'fulfilment', 'deliveryFee', 'total', 'currency', 'buyerCountry', 'lat', 'lng',
+                'addressText', 'payment', 'customsId', 'note', 'status', 'createdAt', 'updatedAt'];
+      }
+
+      function validNewOrder(d) {
+        let l = get(/databases/$(database)/documents/listings/$(d.listingId)).data;
+        let s = get(/databases/$(database)/documents/sellers/$(d.shopUid)).data;
+        return d.buyerUid == request.auth.uid
+          && d.shopUid != request.auth.uid
+          && d.status == 'placed'
+          && d.createdAt == request.time && d.updatedAt == request.time
+          && isNonEmptyString(d.orderNumber, 40)
+          && isNonEmptyString(d.buyerName, 80)
+          && d.buyerPhone is string && d.buyerPhone.matches('^[+][1-9][0-9]{6,14}$')
+          && isNonEmptyString(d.shopName, 80)
+          && isNonEmptyString(d.listingTitle, 140)
+          && isTrimmedString(d.listingImage, 2000)
+          && d.qty is int && d.qty >= 1 && d.qty <= 99
+          && l.status == 'active' && l.inStock == true
+          && l.sellerUid == d.shopUid && l.get('businessId', '') == d.shopUid
+          && s.get('isShop', false) == true && s.get('suspended', false) != true
+          && isNum(d.unitPrice) && d.unitPrice == l.price
+          && d.currency == l.currency
+          && near(d.itemsTotal, d.unitPrice * d.qty)
+          && isNum(d.deliveryFee) && near(d.total, d.itemsTotal + d.deliveryFee)
+          && d.payment in ['card', 'paypal', 'bank']
+          && d.payment in s.get('payMethods', [])
+          && d.fulfilment in ['deliver', 'collect']
+          && (d.fulfilment == 'collect'
+            ? (d.deliveryFee == 0 && d.lat == null && d.lng == null && d.customsId == '' && d.addressText == '')
+            : (s.get('delivery', false) == true
+              && s.get('currency', l.currency) == l.currency
+              && near(d.deliveryFee, s.get('deliveryFee', 0))
+              && isNum(d.lat) && d.lat >= -90 && d.lat <= 90
+              && isNum(d.lng) && d.lng >= -180 && d.lng <= 180))
+          && (d.buyerCountry == '' || (d.buyerCountry is string && d.buyerCountry.matches('^[A-Z]{2}$')))
+          && isTrimmedString(d.addressText, 300)
+          && isTrimmedString(d.customsId, 40)
+          && isTrimmedString(d.note, 500)
+          // Every order has a receipt written in the same batch.
+          && existsAfter(/databases/$(database)/documents/receipts/$(orderId));
+      }
+
+      function statusMoveOk(oldS, newS, shopSide, fulfilment) {
+        return shopSide
+          ? (!(oldS in ['collected', 'cancelled'])
+            && ((newS != 'cancelled' && statusRank(newS) > statusRank(oldS) && !(newS == 'sent' && fulfilment == 'collect'))
+              || (newS == 'cancelled' && oldS in ['placed', 'accepted', 'paid'])))
+          : ((oldS == 'placed' && newS == 'cancelled')
+            || (oldS in ['paid', 'sent'] && newS == 'collected'));
+      }
+
+      function orderChangeOk(shopSide) {
+        let o = resource.data;
+        let n = request.resource.data;
+        return n.updatedAt == request.time
+          && (n.customsId == o.customsId || n.customsId == '')
+          && (n.status == o.status
+            || (statusMoveOk(o.status, n.status, shopSide, o.fulfilment)
+              && getAfter(/databases/$(database)/documents/receipts/$(orderId)).data.status == n.status))
+          && (!(n.status in ['collected', 'cancelled']) || n.customsId == '');
+      }
+
+      allow read: if isSignedIn() && (resource.data.buyerUid == request.auth.uid
+        || resource.data.shopUid == request.auth.uid
+        || isAdmin());
+
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(orderKeys())
+        && validNewOrder(request.resource.data);
+
+      allow update: if isSignedIn() && (
+        // Shop: moves the status forward / cancels, adds a note, clears the customs ID.
+        (resource.data.shopUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'customsId', 'shopNote'])
+          && isTrimmedString(request.resource.data.get('shopNote', ''), 500)
+          && orderChangeOk(true))
+        // Buyer: cancels a new order, or marks it received / collected.
+        || (resource.data.buyerUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'customsId'])
+          && orderChangeOk(false))
+        // Admin: note, or clear the customs ID.
+        || (isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['adminNote', 'customsId', 'updatedAt'])
+          && request.resource.data.get('customsId', '') in ['', resource.data.get('customsId', '')]
+          && isTrimmedString(request.resource.data.get('adminNote', ''), 500))
+      );
+
+      allow delete: if false;
+    }
+
+    // --- 5i. Receipts (append-only proof of sale) ------------------------
+    // Money fields (items, prices, delivery fee, total, currency, payment
+    // method) can never change after creation. Only the status moves
+    // forward, with one new history entry that matches the order. A payment
+    // reference (PayPal transaction ID / bank reference) can be added ONCE by
+    // the buyer or the shop. Admins may only append notes. Nobody deletes.
+    // Receipts never hold bank details or ID numbers.
+    match /receipts/{orderId} {
+      function receiptKeys() {
+        return ['orderId', 'orderNumber', 'buyerUid', 'buyerName', 'shopUid', 'shopName', 'items',
+                'itemsTotal', 'deliveryFee', 'total', 'currency', 'fulfilment', 'payment',
+                'paymentRef', 'status', 'statusHistory', 'adminNotes', 'createdAt', 'updatedAt'];
+      }
+
+      function validNewReceipt(d) {
+        let o = getAfter(/databases/$(database)/documents/orders/$(orderId)).data;
+        return d.orderId == orderId
+          && d.buyerUid == request.auth.uid
+          && o.buyerUid == d.buyerUid && o.shopUid == d.shopUid
+          && o.orderNumber == d.orderNumber && o.buyerName == d.buyerName && o.shopName == d.shopName
+          && o.itemsTotal == d.itemsTotal && o.deliveryFee == d.deliveryFee && o.total == d.total
+          && o.currency == d.currency && o.fulfilment == d.fulfilment && o.payment == d.payment
+          && o.status == 'placed' && o.createdAt == request.time
+          && d.items is list && d.items.size() == 1
+          && d.items[0].keys().hasOnly(['listingId', 'title', 'qty', 'unitPrice'])
+          && d.items[0].listingId == o.listingId && d.items[0].title == o.listingTitle
+          && d.items[0].qty == o.qty && d.items[0].unitPrice == o.unitPrice
+          && d.paymentRef == ''
+          && d.status == 'placed'
+          && d.adminNotes is list && d.adminNotes.size() == 0
+          && d.statusHistory is list && d.statusHistory.size() == 1
+          && d.statusHistory[0].keys().hasOnly(['status', 'at', 'by'])
+          && d.statusHistory[0].status == 'placed'
+          && d.statusHistory[0].by == request.auth.uid
+          && recentTs(d.statusHistory[0].at)
+          && d.createdAt == request.time && d.updatedAt == request.time;
+      }
+
+      function historyOk(o, n) {
+        return n.status == o.status
+          ? n.statusHistory == o.statusHistory
+          : (getAfter(/databases/$(database)/documents/orders/$(orderId)).data.status == n.status
+            && n.statusHistory is list
+            && n.statusHistory.size() == o.statusHistory.size() + 1
+            && n.statusHistory[0:o.statusHistory.size()] == o.statusHistory
+            && n.statusHistory[o.statusHistory.size()].keys().hasOnly(['status', 'at', 'by'])
+            && n.statusHistory[o.statusHistory.size()].status == n.status
+            && n.statusHistory[o.statusHistory.size()].by == request.auth.uid
+            && recentTs(n.statusHistory[o.statusHistory.size()].at));
+      }
+
+      function paymentRefOk(o, n) {
+        let keys = n.diff(o).affectedKeys();
+        return !keys.hasAny(['paymentRef', 'paymentRefBy', 'paymentRefAt'])
+          || (o.paymentRef == ''
+            && isNonEmptyString(n.paymentRef, 80)
+            && n.paymentRefBy == request.auth.uid
+            && n.paymentRefAt == request.time);
+      }
+
+      allow read: if isSignedIn() && (resource.data.buyerUid == request.auth.uid
+        || resource.data.shopUid == request.auth.uid
+        || isAdmin());
+
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly(receiptKeys())
+        && validNewReceipt(request.resource.data);
+
+      allow update: if isSignedIn() && (
+        ((resource.data.buyerUid == request.auth.uid || resource.data.shopUid == request.auth.uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'statusHistory', 'updatedAt', 'paymentRef', 'paymentRefBy', 'paymentRefAt'])
+          && request.resource.data.updatedAt == request.time
+          && historyOk(resource.data, request.resource.data)
+          && paymentRefOk(resource.data, request.resource.data))
+        || (isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['adminNotes', 'updatedAt'])
+          && request.resource.data.adminNotes is list
+          && request.resource.data.adminNotes.size() == resource.data.adminNotes.size() + 1
+          && request.resource.data.adminNotes[0:resource.data.adminNotes.size()] == resource.data.adminNotes
+          && request.resource.data.adminNotes[resource.data.adminNotes.size()].keys().hasOnly(['note', 'by', 'byEmail', 'at'])
+          && isNonEmptyString(request.resource.data.adminNotes[resource.data.adminNotes.size()].note, 500)
+          && request.resource.data.adminNotes[resource.data.adminNotes.size()].by == request.auth.uid
+          && recentTs(request.resource.data.adminNotes[resource.data.adminNotes.size()].at))
+      );
+
+      allow delete: if false;
+    }
+
+    // --- 5j. Shop bank details (private) ---------------------------------
+    // Read by the shop, admins, and buyers who placed a bank-transfer order
+    // with this shop (marker written in the same batch as the order).
+    // Bank details only: never passwords or bank logins.
+    match /shopBankDetails/{shopUid} {
+      allow get: if isOwner(shopUid) || isAdmin()
+        || (isSignedIn() && exists(/databases/$(database)/documents/shopBankDetails/$(shopUid)/buyers/$(request.auth.uid)));
+      allow list: if false;
+      allow create, update: if isOwner(shopUid)
+        && request.resource.data.keys().hasOnly(['accountName', 'bankName', 'accountNumber', 'branchCode', 'swift', 'iban', 'extra', 'updatedAt'])
+        && isNonEmptyString(request.resource.data.accountName, 120)
+        && isNonEmptyString(request.resource.data.bankName, 120)
+        && isTrimmedString(request.resource.data.accountNumber, 60)
+        && isTrimmedString(request.resource.data.branchCode, 40)
+        && isTrimmedString(request.resource.data.swift, 20)
+        && isTrimmedString(request.resource.data.iban, 40)
+        && isTrimmedString(request.resource.data.extra, 300)
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isOwner(shopUid) || isAdmin();
+
+      match /buyers/{buyerUid} {
+        allow get: if isOwner(buyerUid) || isOwner(shopUid) || isAdmin();
+        allow list: if isOwner(shopUid) || isAdmin();
+        allow create, update: if isOwner(buyerUid)
+          && request.resource.data.keys().hasOnly(['orderId', 'at'])
+          && request.resource.data.at == request.time
+          && request.resource.data.orderId is string
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.buyerUid == buyerUid
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.shopUid == shopUid
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.payment == 'bank';
+        allow delete: if isAdmin();
+      }
     }
 
     // --- 5g. Admin audit log (append-only) -----------------------------

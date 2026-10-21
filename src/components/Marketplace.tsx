@@ -41,6 +41,11 @@ import {
   haversineKm, listingMatchesQuery, osmEmbedUrl, rankNearest, setUserArea, shipsToCountry, splitList, toE164, useShopProfiles, useUserLocation, type ListingGroup,
 } from '../lib/partsFinder';
 import { ShopActions, UseMyLocationButton, VerifiedShopBadge } from './PartsFinderPanels';
+import { OrderModal, OrdersSection } from './MarketplaceOrders';
+import {
+  EMPTY_BANK, PAY_LABELS, PAY_SHORT, bankDetailsComplete, getBankDetails, normalisePaypalMe, saveBankDetails, shopPayMethods, useOrderShops,
+  type BankDetails, type PayMethod,
+} from '../lib/orders';
 import {
   ALL_CATEGORIES,
   BUSINESS_CATEGORIES,
@@ -237,7 +242,7 @@ export default function Marketplace({
   useEffect(() => subscribeReviews(setReviews), []);
 
   const { search: urlParams } = usePathname();
-  const [tab, setTab] = useState<Tab>(() => (urlParams.get('tab') === 'sell' || urlParams.get('shop') === '1' ? 'sell' : urlParams.get('tab') === 'requests' ? 'requests' : 'browse'));
+  const [tab, setTab] = useState<Tab>(() => (urlParams.get('tab') === 'sell' || urlParams.get('shop') === '1' ? 'sell' : ['requests', 'orders'].includes(urlParams.get('tab') || '') ? 'requests' : 'browse'));
   const [shopSignup, setShopSignup] = useState(() => urlParams.get('shop') === '1');
   const [search, setSearch] = useState(initialSearchQuery);
   const [category, setCategory] = useState(() => urlParams.get('cat') || 'All');
@@ -259,10 +264,12 @@ export default function Marketplace({
     if (urlParams.get('cat')) setCategory(urlParams.get('cat')!);
     if (urlParams.get('shop') === '1') { setShopSignup(true); setTab('sell'); }
     else if (urlParams.get('tab') === 'sell') setTab('sell');
+    else if (urlParams.get('tab') === 'orders' || urlParams.get('tab') === 'requests') setTab('requests');
   }, [paramKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
   const [buyItem, setBuyItem] = useState<ListingItem | null>(null);
+  const [orderItem, setOrderItem] = useState<ListingItem | null>(null);
   const [profileUid, setProfileUid] = useState<string | null>(null);
 
   useEffect(() => setSearch(initialSearchQuery), [initialSearchQuery]);
@@ -320,6 +327,8 @@ export default function Marketplace({
   const filtered = ranked.map(r => r.item);
   const kmById = new Map(ranked.map(r => [r.item.id, r.km]));
   const shopProfiles = useShopProfiles(filtered.filter(i => i.businessId).slice(0, 60).map(i => i.seller.uid));
+  // Shops that take orders in the app (delivery / collect + card, PayPal or bank transfer).
+  const orderShops = useOrderShops(filtered.filter(i => i.businessId).slice(0, 60).map(i => i.seller.uid));
   const filtersActive = category !== 'All' || group !== 'all' || cond !== 'all' || verifiedOnly || shipsToMe || !!search.trim();
   const clearFilters = () => { setSearch(''); setCategory('All'); setGroup('all'); setCond('all'); setVerifiedOnly(false); setShipsToMe(false); };
   const openShopSignup = () => { setShopSignup(true); setTab('sell'); };
@@ -327,7 +336,7 @@ export default function Marketplace({
   const tabs: { id: Tab; label: string; icon: any }[] = [
     { id: 'browse', label: 'Browse', icon: ShoppingBag },
     { id: 'sell', label: 'Sell', icon: Package },
-    { id: 'requests', label: 'Requests', icon: Inbox },
+    { id: 'requests', label: 'Orders', icon: Inbox },
   ];
 
   return (
@@ -531,6 +540,20 @@ export default function Marketplace({
                         </button>
                         {mine ? (
                           <span className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-500 text-xs font-bold shrink-0">Your listing</span>
+                        ) : item.businessId && orderShops.has(item.seller.uid) ? (
+                          <button
+                            disabled={!item.inStock}
+                            onClick={() => {
+                              if (!user) {
+                                onOpenAuth?.();
+                                return;
+                              }
+                              setOrderItem(item);
+                            }}
+                            className={`${primary} shrink-0`}
+                          >
+                            <ShoppingBag className="w-3.5 h-3.5" /> Buy
+                          </button>
                         ) : (
                           <button
                             disabled={!item.inStock}
@@ -555,7 +578,7 @@ export default function Marketplace({
           )}
 
           <p className="text-[11px] text-slate-400 text-center leading-relaxed">
-            No payments go through the app. "Request to buy" sends your message to the seller; agree on payment and collection or courier directly. Never pay before seeing proof of the item.
+            "Buy" (shops) lets you choose delivery or collection and pay the shop directly by card (through PayPal), PayPal or bank transfer. The app never sees your card number. "Request to buy" sends your message to the seller so you can agree on payment and collection. Never pay before you trust the seller.
           </p>
         </div>
       )}
@@ -569,13 +592,23 @@ export default function Marketplace({
 
       {tab === 'requests' &&
         (user ? (
-          <RequestsPanel uid={user.uid} myName={displayNameOf(user)} reviews={reviews} primary={primary} />
+          <div className="space-y-8">
+            <OrdersSection uid={user.uid} primary={primary} />
+            <div className="space-y-3">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Messages from "Request to buy"</h3>
+              <RequestsPanel uid={user.uid} myName={displayNameOf(user)} reviews={reviews} primary={primary} />
+            </div>
+          </div>
         ) : (
-          <SignInPrompt what="see your buy requests" onOpenAuth={onOpenAuth} primary={primary} />
+          <SignInPrompt what="see your orders" onOpenAuth={onOpenAuth} primary={primary} />
         ))}
 
       {buyItem && user && (
         <BuyModal item={buyItem} buyer={{ uid: user.uid, name: displayNameOf(user), email: user.email || '' }} onClose={() => setBuyItem(null)} onDone={() => { setBuyItem(null); setTab('requests'); }} primary={primary} />
+      )}
+
+      {orderItem && user && orderShops.get(orderItem.seller.uid) && (
+        <OrderModal item={orderItem} shop={orderShops.get(orderItem.seller.uid)!} buyer={{ uid: user.uid, name: displayNameOf(user) }} onClose={() => setOrderItem(null)} onViewOrders={() => { setOrderItem(null); setTab('requests'); }} primary={primary} />
       )}
 
       {profileUid && (
@@ -835,10 +868,13 @@ function ShopDetails({ shop }: { shop: SellerProfile }) {
         {shop.hours && <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Clock className="w-4 h-4 shrink-0 text-slate-400" />{shop.hours}</p>}
         <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Package className="w-4 h-4 shrink-0 text-slate-400" />{stock}</p>
         <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Truck className="w-4 h-4 shrink-0 text-slate-400" />
-          {shop.shipsInternationally && shop.shipsTo?.length
-            ? (shop.shipsTo.includes('WORLDWIDE') ? 'Ships worldwide' : `Ships to ${shop.shipsTo.map(countryName).join(', ')}`)
-            : shop.delivery ? 'Delivers / couriers locally' : 'Collection at the shop'}
+          {!shop.delivery && !shop.shipsInternationally
+            ? "We don't deliver: collect at the shop"
+            : `Delivers${shop.deliveryMaxKm ? ` up to ${shop.deliveryMaxKm} km` : ' locally'}${shop.shipsInternationally && shop.shipsTo?.length ? (shop.shipsTo.includes('WORLDWIDE') ? ', ships worldwide' : `, ships to ${shop.shipsTo.map(countryName).join(', ')}`) : ''}${typeof shop.deliveryFee === 'number' && shop.delivery ? ` · fee ${formatZar(shop.deliveryFee, shop.currency || 'USD')}` : ''}`}
         </p>
+        {shopPayMethods(shop).length > 0 && (
+          <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><ShoppingBag className="w-4 h-4 shrink-0 text-slate-400" />Pay by {shopPayMethods(shop).map(m => PAY_SHORT[m]).join(', ')}</p>
+        )}
         {shop.email && <a href={`mailto:${shop.email}`} className="flex items-start gap-1.5 text-cobalt-600 dark:text-cobalt-300 font-bold break-all">✉ {shop.email}</a>}
       </div>
       <ShopActions shop={shop} partName="a part" />
@@ -1038,7 +1074,18 @@ function SellerProfileForm({
   const [phone, setPhone] = useState(existing?.phone || '');
   const [whatsapp, setWhatsapp] = useState(existing?.whatsapp || '');
   const [email, setEmail] = useState(existing?.email || defaultEmail);
-  const [delivery, setDelivery] = useState(!!existing?.delivery);
+  const [delivery, setDelivery] = useState(!!existing?.delivery || !!existing?.shipsInternationally);
+  const [deliveryFee, setDeliveryFee] = useState(typeof existing?.deliveryFee === 'number' ? String(existing.deliveryFee) : '');
+  const [deliveryMaxKm, setDeliveryMaxKm] = useState(typeof existing?.deliveryMaxKm === 'number' ? String(existing.deliveryMaxKm) : '');
+  const [payMethods, setPayMethods] = useState<PayMethod[]>(() => (existing?.payMethods || []).filter((m): m is PayMethod => ['card', 'paypal', 'bank'].includes(m)));
+  const [paypalEmail, setPaypalEmail] = useState(existing?.paypalEmail || '');
+  const [paypalMe, setPaypalMe] = useState(existing?.paypalMe || '');
+  const [bank, setBank] = useState<BankDetails>(EMPTY_BANK);
+  useEffect(() => {
+    if (!existing?.isShop) return;
+    getBankDetails(uid).then(b => { if (b) setBank(b); }).catch(() => undefined);
+  }, [uid, existing?.isShop]);
+  const togglePay = (m: PayMethod) => setPayMethods(cur => (cur.includes(m) ? cur.filter(x => x !== m) : [...cur, m]));
   const [shipsInternationally, setShipsInternationally] = useState(!!existing?.shipsInternationally);
   const [shipsTo, setShipsTo] = useState<string[]>(existing?.shipsTo?.length ? existing.shipsTo : ['WORLDWIDE']);
   const [stockType, setStockType] = useState<StockType>(existing?.stockType || 'both');
@@ -1091,6 +1138,16 @@ function SellerProfileForm({
     setBusy(true);
     setErr(null);
     try {
+      const fee = Number(deliveryFee || 0);
+      const maxKm = deliveryMaxKm.trim() ? Number(deliveryMaxKm) : null;
+      if (isShop && delivery && (!Number.isFinite(fee) || fee < 0)) throw new Error('Type the delivery fee as a number, e.g. 5 or 0 for free delivery.');
+      if (isShop && delivery && maxKm !== null && (!Number.isFinite(maxKm) || maxKm <= 0)) throw new Error('Type the max delivery distance in km, or leave it empty for no limit.');
+      const meLink = normalisePaypalMe(paypalMe);
+      if (isShop && paypalMe.trim() && !meLink) throw new Error('Check the PayPal.me link. It looks like paypal.me/yourname.');
+      if (isShop && payMethods.includes('bank')) {
+        if (!bankDetailsComplete(bank)) throw new Error('For bank transfer, add the account name, the bank name and the account number (or IBAN).');
+        await saveBankDetails(uid, bank);
+      }
       await saveSellerProfile(
         uid,
         isShop
@@ -1099,7 +1156,9 @@ function SellerProfileForm({
               logoUrl: logo.url, logoPath: logo.path, shopfrontUrl: shopfront.url, shopfrontPath: shopfront.path,
               address, town, province, country, currency, lat: pin?.lat ?? null, lng: pin?.lng ?? null,
               hours, phone, whatsapp, email, delivery, stockType, registrationNumber,
-              shipsInternationally, shipsTo: shipsInternationally ? shipsTo : [],
+              shipsInternationally: delivery && shipsInternationally, shipsTo: delivery && shipsInternationally ? shipsTo : [],
+              deliveryFee: delivery ? fee : 0, deliveryMaxKm: delivery ? maxKm : null,
+              payMethods, paypalEmail: paypalEmail.trim(), paypalMe: meLink,
             }
           : { displayName, sellerType: kind as SellerType, location, bio, isShop: false },
         !!existing
@@ -1265,32 +1324,110 @@ function SellerProfileForm({
                 {[...new Set([currency, ...CURRENCIES])].filter(Boolean).map(c => <option key={c}>{c}</option>)}
               </select>
             </div>
-            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
-              <input type="checkbox" checked={delivery} onChange={e => setDelivery(e.target.checked)} className="rounded accent-indigo-600" /> <Truck className="w-4 h-4" /> We deliver / courier parts locally
-            </label>
-            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
-              <input type="checkbox" checked={shipsInternationally} onChange={e => setShipsInternationally(e.target.checked)} className="rounded accent-indigo-600" /> We ship to other countries (e.g. an overseas supplier)
-            </label>
-            {shipsInternationally && (
-              <div className="pl-6 space-y-2">
-                <div className="flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
-                  <label className="inline-flex items-center gap-1.5"><input type="radio" checked={shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo(['WORLDWIDE'])} className="accent-indigo-600" /> Worldwide</label>
-                  <label className="inline-flex items-center gap-1.5"><input type="radio" checked={!shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo([])} className="accent-indigo-600" /> Only to these countries</label>
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5"><Truck className="w-3.5 h-3.5" /> Delivery</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {([[true, 'We deliver', 'Buyers can choose "Deliver to me" and pay your delivery fee.'], [false, "We don't deliver", 'Buyers collect from the shop.']] as const).map(([v, title, body]) => (
+                <button key={title} type="button" onClick={() => setDelivery(v)} className={`text-left p-3 rounded-2xl border-2 ${delivery === v ? 'border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-700'}`}>
+                  <span className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-slate-100">{title}{delivery === v && <CheckCircle2 className="w-4 h-4 text-emerald-500 ml-auto" />}</span>
+                  <span className="block text-[11px] text-slate-500 mt-1">{body}</span>
+                </button>
+              ))}
+            </div>
+            {delivery && (
+              <div className="space-y-3 pl-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Delivery fee ({currency || 'your currency'})</label>
+                    <input type="number" min={0} step="0.01" inputMode="decimal" value={deliveryFee} onChange={e => setDeliveryFee(e.target.value)} placeholder="e.g. 5 (0 = free)" className={inputCls} />
+                    <p className="text-[10px] text-slate-400 mt-1">One flat fee per order, added to the item price.</p>
+                  </div>
+                  <div>
+                    <label className={labelCls}>Max distance for local delivery, km (optional)</label>
+                    <input type="number" min={1} step="1" inputMode="numeric" value={deliveryMaxKm} onChange={e => setDeliveryMaxKm(e.target.value)} placeholder="Empty = no limit" className={inputCls} />
+                    <p className="text-[10px] text-slate-400 mt-1">Measured from your map pin to the buyer's pin.</p>
+                  </div>
                 </div>
-                {!shipsTo.includes('WORLDWIDE') && (
-                  <>
-                    <select value="" onChange={e => { const c = e.target.value; if (c && !shipsTo.includes(c)) setShipsTo([...shipsTo, c].slice(0, 60)); }} className={inputCls} aria-label="Add a country you ship to">
-                      <option value="">Tap to add a country you ship to…</option>
-                      {COUNTRIES.filter(c => !shipsTo.includes(c.code)).map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
-                    </select>
-                    <div className="flex flex-wrap gap-1.5">
-                      {shipsTo.map(c => (
-                        <button key={c} type="button" onClick={() => setShipsTo(shipsTo.filter(x => x !== c))} className="px-2 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">{countryName(c)} <X className="w-3 h-3" /></button>
-                      ))}
-                      {shipsTo.length === 0 && <span className="text-[11px] text-amber-700 dark:text-amber-300">Add at least one country, or choose Worldwide.</span>}
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+                  <input type="checkbox" checked={shipsInternationally} onChange={e => setShipsInternationally(e.target.checked)} className="rounded accent-indigo-600" /> We ship to other countries (e.g. an overseas supplier)
+                </label>
+                {shipsInternationally && (
+                  <div className="pl-6 space-y-2">
+                    <div className="flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
+                      <label className="inline-flex items-center gap-1.5"><input type="radio" checked={shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo(['WORLDWIDE'])} className="accent-indigo-600" /> Worldwide</label>
+                      <label className="inline-flex items-center gap-1.5"><input type="radio" checked={!shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo([])} className="accent-indigo-600" /> Only to these countries</label>
                     </div>
-                  </>
+                    {!shipsTo.includes('WORLDWIDE') && (
+                      <>
+                        <select value="" onChange={e => { const c = e.target.value; if (c && !shipsTo.includes(c)) setShipsTo([...shipsTo, c].slice(0, 60)); }} className={inputCls} aria-label="Add a country you ship to">
+                          <option value="">Tap to add a country you ship to…</option>
+                          {COUNTRIES.filter(c => !shipsTo.includes(c.code)).map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                        </select>
+                        <div className="flex flex-wrap gap-1.5">
+                          {shipsTo.map(c => (
+                            <button key={c} type="button" onClick={() => setShipsTo(shipsTo.filter(x => x !== c))} className="px-2 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">{countryName(c)} <X className="w-3 h-3" /></button>
+                          ))}
+                          {shipsTo.length === 0 && <span className="text-[11px] text-amber-700 dark:text-amber-300">Add at least one country, or choose Worldwide.</span>}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5"><ShoppingBag className="w-3.5 h-3.5" /> How buyers pay you</h3>
+            <p className="text-[11px] text-slate-500 -mt-1">Tick the ways you accept. Money goes straight to you. The app never asks for or keeps card numbers. Tick at least one to get a "Buy" button on your listings.</p>
+            <div className="space-y-2">
+              {(['card', 'paypal', 'bank'] as PayMethod[]).map(m => (
+                <label key={m} className="flex items-start gap-2 text-xs text-slate-700 dark:text-slate-200">
+                  <input type="checkbox" checked={payMethods.includes(m)} onChange={() => togglePay(m)} className="mt-0.5 rounded accent-indigo-600" />
+                  <span><b>{PAY_LABELS[m]}</b><span className="block text-[11px] text-slate-500">
+                    {m === 'card' ? 'Buyers pay with Visa or Mastercard on PayPal\'s page, no PayPal account needed. Needs your PayPal email. In PayPal, turn on "PayPal account optional" so buyers can pay by card.'
+                      : m === 'paypal' ? 'Buyers pay from their PayPal account. Needs your PayPal email or PayPal.me link.'
+                      : 'Buyers pay into your bank account. Your bank details are shown only to buyers after they place an order.'}
+                  </span></span>
+                </label>
+              ))}
+            </div>
+            {(payMethods.includes('card') || payMethods.includes('paypal')) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>PayPal email{payMethods.includes('card') ? '' : ' (or use PayPal.me)'}</label>
+                  <input type="email" value={paypalEmail} onChange={e => setPaypalEmail(e.target.value)} placeholder="the email of your PayPal account" className={inputCls} maxLength={160} />
+                </div>
+                <div>
+                  <label className={labelCls}>PayPal.me link (optional)</label>
+                  <input value={paypalMe} onChange={e => setPaypalMe(e.target.value)} placeholder="paypal.me/yourshop" className={inputCls} maxLength={100} />
+                </div>
+              </div>
+            )}
+            {payMethods.includes('bank') && (
+              <div className="space-y-2 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/40">
+                <p className="text-[11px] text-slate-500">Bank details for transfers. Kept private: only you, our admins, and buyers who placed an order with you can see them. Never type passwords or bank logins here.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {([
+                    ['accountName', 'Account name', 'Name on the account'],
+                    ['bankName', 'Bank name', 'e.g. City Bank'],
+                    ['accountNumber', 'Account number', ''],
+                    ['branchCode', 'Branch / sort / routing code (optional)', ''],
+                    ['iban', 'IBAN (optional)', ''],
+                    ['swift', 'SWIFT / BIC (optional, for overseas buyers)', ''],
+                  ] as [keyof BankDetails, string, string][]).map(([k, label, ph]) => (
+                    <div key={k}>
+                      <label className={labelCls}>{label}</label>
+                      <input value={bank[k]} onChange={e => setBank({ ...bank, [k]: e.target.value })} placeholder={ph} className={inputCls} maxLength={k === 'accountName' || k === 'bankName' ? 120 : 60} autoComplete="off" />
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <label className={labelCls}>Note for buyers (optional)</label>
+                  <input value={bank.extra} onChange={e => setBank({ ...bank, extra: e.target.value })} placeholder="e.g. Send proof of payment on WhatsApp" className={inputCls} maxLength={300} />
+                </div>
               </div>
             )}
             <p className="text-[11px] text-slate-500 bg-slate-50 dark:bg-slate-800/50 rounded-xl p-3">Shops and suppliers are on the Business plan ({BUSINESS_PLAN_PRICE}). You start on a trial; no payment is taken in the app. Our team will contact you about the plan. Selling just your own item? Choose Individual instead: it is free forever.</p>
