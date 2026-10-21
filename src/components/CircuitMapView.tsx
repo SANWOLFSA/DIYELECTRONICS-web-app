@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, Camera, Network, X, Zap, Gauge, Info, Maximize2, Minimize2, ExternalLink } from 'lucide-react';
+import { AlertTriangle, Camera, Network, X, Zap, Gauge, Info, Maximize2, Minimize2, ExternalLink, Eye } from 'lucide-react';
+import MeterTestLinks from './meter/MeterTestLinks';
+import { NoMultimeterCard, WhereToBuy } from './PartsFinderPanels';
 
 /** Shape returned by POST /api/circuit-map (see server.ts sanitizeCircuitMap). */
 export type Box = [number, number, number, number]; // [ymin, xmin, ymax, xmax], 0-1000
@@ -11,7 +13,14 @@ export interface CircuitMap {
   blocks: CircuitBlock[]; connections: CircuitConnection[]; powerFlow: string[]; components: CircuitComponent[];
   testPoints: { label: string; blockId: string | null; expected: string; how: string }[];
   failurePoints: { component: string; symptom: string; blockId: string | null }[];
+  /** Checks a user without a multimeter can do (look, smell, listen, LED, photo). */
+  noToolChecks?: string[];
   safety: string;
+}
+
+const METER_KEY = 'diy_has_multimeter';
+function readHasMeter(): boolean | null {
+  try { const v = localStorage.getItem(METER_KEY); return v === 'yes' ? true : v === 'no' ? false : null; } catch { return null; }
 }
 export interface CircuitMapResult { map: CircuitMap; hasPhoto: boolean; board?: string; disclaimer: string; photoSource?: string | null }
 
@@ -33,7 +42,18 @@ export default function CircuitMapView({ result, photoUrl }: { result: CircuitMa
     return first ? { kind: 'component', id: first.id } : null;
   });
   const [expanded, setExpanded] = useState(false);
+  const [hasMeter, setHasMeterState] = useState<boolean | null>(readHasMeter);
+  const setHasMeter = (v: boolean) => { setHasMeterState(v); try { localStorage.setItem(METER_KEY, v ? 'yes' : 'no'); } catch { /* ignore */ } };
   const suspects = map.components.filter(c => c.check);
+  const partsText = useMemo(() => map.components.map(c => `${c.ref} ${c.label} ${c.type}`).concat(map.blocks.flatMap(b => b.keyParts)).join(' \n '), [map]);
+  const testText = useMemo(() => suspects.map(c => `${c.label} ${c.type} ${c.measure}`).join(' \n '), [suspects]);
+  const noToolChecks = map.noToolChecks?.length ? map.noToolChecks : [
+    'Look closely at every part for burn marks, cracks, melted plastic or swollen / leaking capacitor tops.',
+    'Smell the board: a burnt smell points to the part that failed.',
+    'Plug in and listen: clicking, ticking or buzzing from the power section is a clue.',
+    'Watch the power / standby LED: off, on, or blinking (count the blinks).',
+    'Send a clear, well-lit photo of the board so the AI can look for damage.',
+  ];
   const suspectBlocks = useMemo(() => new Set(suspects.map(c => c.blockId).filter(Boolean) as string[]), [suspects]);
 
   const selected = sel?.kind === 'component' ? map.components.find(c => c.id === sel.id) : null;
@@ -116,6 +136,33 @@ export default function CircuitMapView({ result, photoUrl }: { result: CircuitMa
             </div>
           </div>
         )}
+
+        {/* Do you have a multimeter? (precise answers need one) */}
+        <div className="rounded-xl border border-stone-200 dark:border-stone-700 p-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs font-bold text-stone-900 dark:text-stone-100 flex items-center gap-1.5"><Gauge className="w-4 h-4 text-emerald-600" /> Do you have a multimeter?</p>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => setHasMeter(true)} className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${hasMeter === true ? 'bg-emerald-600 text-white' : 'bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300'}`}>Yes</button>
+              <button type="button" onClick={() => setHasMeter(false)} className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${hasMeter === false ? 'bg-amber-500 text-white' : 'bg-stone-100 dark:bg-stone-800 text-stone-600 dark:text-stone-300'}`}>No</button>
+            </div>
+          </div>
+          {hasMeter === true && (
+            <>
+              <p className="text-[11px] text-stone-600 dark:text-stone-300">Tap each flashing part above: it shows where to turn the dial, where the red and black probes go and the reading to expect. Then type your reading in the chat and the AI will narrow the fault down.</p>
+              <MeterTestLinks text={testText || partsText} />
+            </>
+          )}
+          {hasMeter === false && (
+            <>
+              <p className="text-[11px] font-bold text-stone-700 dark:text-stone-200 flex items-center gap-1"><Eye className="w-3.5 h-3.5" /> Checks you can do without a meter</p>
+              <ol className="list-decimal pl-5 space-y-0.5 text-[11px] text-stone-600 dark:text-stone-300">{noToolChecks.map((c, i) => <li key={i}>{c}</li>)}</ol>
+              <p className="text-[11px] text-stone-500">Measuring the flashing parts needs a multimeter.</p>
+              <NoMultimeterCard />
+            </>
+          )}
+        </div>
+
+        <WhereToBuy text={partsText} />
 
         {map.summary && <p className="text-xs text-stone-600 dark:text-stone-400 leading-relaxed">{map.summary}</p>}
         {map.powerFlow.length > 1 && (

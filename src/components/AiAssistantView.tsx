@@ -10,6 +10,8 @@ import { compressImageFile, extractVideoFrames, fitToBudget, makeThumb, prepareI
 import type { PreparedImage } from '../lib/media';
 import { streamChat, prewarmAi } from '../lib/aiStream';
 import CircuitMapView from './CircuitMapView';
+import { NoMultimeterCard, WhereToBuy } from './PartsFinderPanels';
+import { asksForMeasurement } from '../lib/partsFinder';
 import type { CircuitMapResult } from './CircuitMapView';
 import { useOwnershipGate } from './OwnershipAgreementModal';
 import { isOwnershipSensitive } from '../lib/ownershipAgreement';
@@ -413,6 +415,12 @@ export default function AiAssistantView() {
                   {msg.streaming && <span className="inline-block w-2 h-4 align-middle bg-cobalt-500 animate-pulse ml-0.5" aria-hidden />}
                   {msg.circuit && <div className="mt-2.5 -mx-1.5 sm:mx-0"><CircuitMapView result={msg.circuit.result} photoUrl={msg.circuit.photoUrl} /></div>}
                   {msg.board && !msg.streaming && <BoardResults board={msg.board} onMap={mapFromWebPhoto} onAsk={askAboutWebPhoto} disabled={isGenerating} />}
+                  {!msg.streaming && !msg.circuit && msg.text && msg.id !== '1' && (
+                    <>
+                      <WhereToBuy text={msg.text} className="mt-2.5" />
+                      {activePersona.id === 'sanwolf' && asksForMeasurement(msg.text) && <NoMultimeterCard className="mt-2" />}
+                    </>
+                  )}
                 </>
               ) : (
                 msg.text && <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>

@@ -2,6 +2,7 @@
 // Saved parts load from Firestore (discoveredComponents); unknown ones are researched once (Gemini + Google
 // Search, cited) and saved. Datasheet / distributor links are plain searches, so they always work.
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { WhereToBuy } from '../PartsFinderPanels';
 import { Cpu, Search, FileText, Gauge, Repeat, ShoppingBag, CircuitBoard, Info, ListChecks, Share2, Check } from 'lucide-react';
 import { usePathname, navigate, RouteLink } from '../../hooks/usePathname';
 import {
@@ -179,7 +180,7 @@ function ComponentPage({ rawId, onOpenAuth }: { rawId: string; onOpenAuth?: () =
         )}
         <div className="flex flex-wrap gap-2">
           <RouteLink to={testKey ? multimeterTestPath(testKey) : '/multimeter'} className={btnPrimary}><Gauge className="w-3.5 h-3.5" /> How to test {testKey ? `a ${COMPONENT_TYPES.find((t) => t.key === testKey)?.label.replace(/s$/, '').toLowerCase() || testKey}` : 'it with a multimeter'}</RouteLink>
-          <RouteLink to={`/marketplace?q=${encodeURIComponent(info?.partNumber || q)}`} className={btnGhost}><ShoppingBag className="w-3.5 h-3.5" /> Find on the marketplace</RouteLink>
+          <RouteLink to={`/marketplace?q=${encodeURIComponent(info?.partNumber || q)}&near=1`} className={btnGhost}><ShoppingBag className="w-3.5 h-3.5" /> Find it in the Marketplace</RouteLink>
           <RouteLink to={`/blueprint-viewer/board/${encodeURIComponent(id)}`} className={btnGhost}><CircuitBoard className="w-3.5 h-3.5" /> It's a PCB number</RouteLink>
           <button onClick={() => { navigator.clipboard?.writeText(window.location.href).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => undefined); }} className={btnGhost}>
             {copied ? <Check className="w-3.5 h-3.5" /> : <Share2 className="w-3.5 h-3.5" />} {copied ? 'Copied' : 'Share'}
@@ -192,6 +193,8 @@ function ComponentPage({ rawId, onOpenAuth }: { rawId: string; onOpenAuth?: () =
             : !owner ? <SignInPrompt action="save this part as a permanent page" onOpenAuth={onOpenAuth} /> : null
         )}
       </div>
+
+      <WhereToBuy text={[info?.partNumber || '', q].join('\n')} max={4} />
 
       <div className="grid lg:grid-cols-2 gap-4">
         <section className={`${card} p-5 space-y-3`}>

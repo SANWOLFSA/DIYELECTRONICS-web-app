@@ -258,7 +258,7 @@ export default function App() {
   // "Source this part" opens the marketplace pre-searched for the part (Spare Parts was merged away).
   const handleSourcePart = (partNumber: string) => {
     setInitialSearchQuery(partNumber);
-    navigate(`/marketplace?q=${encodeURIComponent(partNumber)}`);
+    navigate(`/marketplace?q=${encodeURIComponent(partNumber)}&near=1`);
   };
 
   const handleSelectMarketplace = (brand: string) => {

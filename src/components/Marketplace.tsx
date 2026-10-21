@@ -9,6 +9,12 @@ import {
   ExternalLink,
   FileText,
   ImagePlus,
+  LocateFixed,
+  MapPin,
+  Store,
+  Truck,
+  Wrench,
+  Sparkles,
   Inbox,
   Loader2,
   Package,
@@ -29,6 +35,12 @@ import type { ThemeConfig } from '../lib/theme';
 import { useAuthUser } from '../lib/admin';
 import { isFirebaseConfigured } from '../lib/firebase';
 import { consumeListingFocus, useMarketplaceState, PLACEHOLDER_IMAGE, type ListingItem } from '../lib/marketplaceListings';
+import { usePathname } from '../hooks/usePathname';
+import {
+  COUNTRIES, CURRENCIES, PHONE_HELP, REGISTRATION_HINT, countryName, currencyForCountry, currentPosition, formatKm, geocodeAddress, guessCountry, hasCoords,
+  haversineKm, listingMatchesQuery, osmEmbedUrl, rankNearest, setUserArea, shipsToCountry, splitList, toE164, useShopProfiles, useUserLocation, type ListingGroup,
+} from '../lib/partsFinder';
+import { ShopActions, UseMyLocationButton, VerifiedShopBadge } from './PartsFinderPanels';
 import {
   ALL_CATEGORIES,
   BUSINESS_CATEGORIES,
@@ -50,6 +62,12 @@ import {
   saveSellerProfile,
   saveVerification,
   setListingStock,
+  submitShopVerification,
+  BUSINESS_PLAN_PRICE,
+  PLAN_LABELS,
+  shopPlan,
+  syncListingLocations,
+  uploadShopImage,
   subscribeMyListings,
   subscribeMyVerification,
   subscribeRequests,
@@ -66,6 +84,7 @@ import {
   type Review,
   type SellerProfile,
   type SellerType,
+  type StockType,
   type SellerVerification,
   type StoredDoc,
   type VerificationFields,
@@ -217,9 +236,30 @@ export default function Marketplace({
   const [reviews, setReviews] = useState<Review[]>([]);
   useEffect(() => subscribeReviews(setReviews), []);
 
-  const [tab, setTab] = useState<Tab>('browse');
+  const { search: urlParams } = usePathname();
+  const [tab, setTab] = useState<Tab>(() => (urlParams.get('tab') === 'sell' || urlParams.get('shop') === '1' ? 'sell' : urlParams.get('tab') === 'requests' ? 'requests' : 'browse'));
+  const [shopSignup, setShopSignup] = useState(() => urlParams.get('shop') === '1');
   const [search, setSearch] = useState(initialSearchQuery);
-  const [category, setCategory] = useState('All');
+  const [category, setCategory] = useState(() => urlParams.get('cat') || 'All');
+  // Spare-parts finder filters (also set by deep links: ?group=tools&cond=used&verified=1&near=1)
+  const [group, setGroup] = useState<'all' | ListingGroup>(() => (['parts', 'tools'].includes(urlParams.get('group') || '') ? (urlParams.get('group') as ListingGroup) : 'all'));
+  const [cond, setCond] = useState<'all' | 'new' | 'used'>(() => (['new', 'used'].includes(urlParams.get('cond') || '') ? (urlParams.get('cond') as 'new' | 'used') : 'all'));
+  const [verifiedOnly, setVerifiedOnly] = useState(() => urlParams.get('verified') === '1');
+  const [nearest, setNearest] = useState(() => urlParams.get('near') === '1');
+  const [shipsToMe, setShipsToMe] = useState(false);
+  const userLoc = useUserLocation();
+  const paramKey = urlParams.toString();
+  useEffect(() => {
+    const g = urlParams.get('group');
+    if (g === 'parts' || g === 'tools') setGroup(g);
+    const c = urlParams.get('cond');
+    if (c === 'new' || c === 'used') setCond(c);
+    if (urlParams.get('verified') === '1') setVerifiedOnly(true);
+    if (urlParams.get('near') === '1') setNearest(true);
+    if (urlParams.get('cat')) setCategory(urlParams.get('cat')!);
+    if (urlParams.get('shop') === '1') { setShopSignup(true); setTab('sell'); }
+    else if (urlParams.get('tab') === 'sell') setTab('sell');
+  }, [paramKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
   const [buyItem, setBuyItem] = useState<ListingItem | null>(null);
@@ -260,17 +300,29 @@ export default function Marketplace({
     return ['All', ...ALL_CATEGORIES.filter(c => used.has(c)), ...[...used].filter(c => !ALL_CATEGORIES.includes(c))];
   }, [listings]);
 
-  const filtered = listings.filter(item => {
+  const matching = listings.filter(item => {
     if (category !== 'All' && item.category !== category) return false;
-    const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return (
-      item.title.toLowerCase().includes(q) ||
-      item.description.toLowerCase().includes(q) ||
-      item.seller.name.toLowerCase().includes(q) ||
-      item.category.toLowerCase().includes(q)
-    );
+    if (group !== 'all' && item.group !== group) return false;
+    if (cond === 'new' && !item.isNew) return false;
+    if (cond === 'used' && item.isNew) return false;
+    if (verifiedOnly && !item.seller.isVerifiedCompany) return false;
+    // "Available to me": local listings in my country, or suppliers that ship here.
+    if (shipsToMe && userLoc.country && item.country && item.country !== userLoc.country && !shipsToCountry(item, userLoc.country)) return false;
+    return listingMatchesQuery(item, search);
   });
+  // Nearest first: verified shops first, then distance (or your country / area), then price.
+  // Otherwise newest first, with verified sellers ahead when searching.
+  const ranked: { item: ListingItem; km: number | null }[] = nearest
+    ? rankNearest(matching, userLoc)
+    : [...matching]
+        .sort((a, b) => (search.trim() ? Number(b.seller.isVerifiedCompany) - Number(a.seller.isVerifiedCompany) : 0))
+        .map(item => ({ item, km: userLoc.coords && hasCoords(item) ? haversineKm(userLoc.coords, item) : null }));
+  const filtered = ranked.map(r => r.item);
+  const kmById = new Map(ranked.map(r => [r.item.id, r.km]));
+  const shopProfiles = useShopProfiles(filtered.filter(i => i.businessId).slice(0, 60).map(i => i.seller.uid));
+  const filtersActive = category !== 'All' || group !== 'all' || cond !== 'all' || verifiedOnly || shipsToMe || !!search.trim();
+  const clearFilters = () => { setSearch(''); setCategory('All'); setGroup('all'); setCond('all'); setVerifiedOnly(false); setShipsToMe(false); };
+  const openShopSignup = () => { setShopSignup(true); setTab('sell'); };
 
   const tabs: { id: Tab; label: string; icon: any }[] = [
     { id: 'browse', label: 'Browse', icon: ShoppingBag },
@@ -286,14 +338,18 @@ export default function Marketplace({
         <div className="space-y-2 max-w-2xl relative">
           <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${themeConfig?.headerBadgeBg || 'bg-emerald-50 dark:bg-emerald-400/10'} ${themeConfig?.headerBadgeText || 'text-emerald-700 dark:text-emerald-300'} ${themeConfig?.headerBadgeBorder || 'border-emerald-200 dark:border-emerald-400/30'}`}>
             <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Repair-tech marketplace · South Africa · ZAR</span>
+            <span>Repair-tech marketplace · worldwide</span>
           </div>
-          <h1 className="text-2xl sm:text-4xl font-bold text-slate-900 dark:text-slate-50 tracking-tight">Tools, test gear & parts from fellow techs</h1>
+          <h1 className="text-2xl sm:text-4xl font-bold text-slate-900 dark:text-slate-50 tracking-tight">Spare parts, tools & test gear near you</h1>
           <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
-            Buy and sell bench equipment, consumables and donor boards. Companies earn the <span className="font-bold text-emerald-600 dark:text-emerald-300">Verified</span> badge only after our team checks their CIPC registration, SARS documents and proof of address.
+            Find the exact part you need (new or used: screens, T-con and power boards, capacitors, donor boards) and the tools to fit it, from shops and fellow techs. Search a part number, then tap <span className="font-bold">Nearest first</span>. Shops earn the <span className="font-bold text-emerald-600 dark:text-emerald-300">Verified</span> badge only after our team checks their business registration.
           </p>
         </div>
-        <div className="flex bg-slate-100 dark:bg-slate-800/80 rounded-2xl p-1 relative self-start md:self-auto">
+        <div className="flex flex-col items-stretch md:items-end gap-2 relative self-start md:self-auto">
+        <button type="button" onClick={openShopSignup} className={`${primary} justify-center`}>
+          <Store className="w-4 h-4" /> List your shop
+        </button>
+        <div className="flex bg-slate-100 dark:bg-slate-800/80 rounded-2xl p-1">
           {tabs.map(t => {
             const Icon = t.icon;
             const active = tab === t.id;
@@ -311,6 +367,7 @@ export default function Marketplace({
               </button>
             );
           })}
+        </div>
         </div>
       </div>
 
@@ -332,7 +389,7 @@ export default function Marketplace({
                 type="text"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder="Search oscilloscope, hot-air station, flux, donor board…"
+                placeholder="Search a part number or tool: 6870C-0442B, 470uF 25V, multimeter…"
                 className={`${inputCls} pl-9`}
               />
             </div>
@@ -351,7 +408,47 @@ export default function Marketplace({
                 </button>
               ))}
             </div>
+            <div className="w-full flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
+              {([['all', 'Everything'], ['parts', 'Parts'], ['tools', 'Tools & meters']] as const).map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setGroup(id)} className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1 ${group === id ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>
+                  {id === 'tools' ? <Wrench className="w-3.5 h-3.5" /> : id === 'parts' ? <Package className="w-3.5 h-3.5" /> : null}{label}
+                </button>
+              ))}
+              <span className="w-px h-5 bg-slate-200 dark:bg-slate-700 mx-1" />
+              {([['all', 'New & used'], ['new', 'New'], ['used', 'Used / salvage']] as const).map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setCond(id)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${cond === id ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>{label}</button>
+              ))}
+              <span className="w-px h-5 bg-slate-200 dark:bg-slate-700 mx-1" />
+              <label className="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-bold text-slate-600 dark:text-slate-300 cursor-pointer">
+                <input type="checkbox" checked={verifiedOnly} onChange={e => setVerifiedOnly(e.target.checked)} className="rounded accent-emerald-600" /> <BadgeCheck className="w-3.5 h-3.5 text-emerald-600" /> Verified only
+              </label>
+              <button type="button" onClick={() => setNearest(n => !n)} className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1 ${nearest ? 'bg-emerald-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>
+                <MapPin className="w-3.5 h-3.5" /> Nearest first
+              </button>
+              <button type="button" onClick={() => setShipsToMe(v => !v)} title={userLoc.country ? `Shops in ${countryName(userLoc.country)} and suppliers that ship there` : 'Choose your country under Nearest first'} className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1 ${shipsToMe ? 'bg-emerald-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>
+                <Truck className="w-3.5 h-3.5" /> {userLoc.country ? `Available in ${countryName(userLoc.country)}` : 'Ships to me'}
+              </button>
+            </div>
+            {nearest && (
+              <div className="w-full flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                {userLoc.coords ? (
+                  <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300 font-bold"><LocateFixed className="w-3.5 h-3.5" /> Sorted by distance from you</span>
+                ) : (
+                  <>
+                    <UseMyLocationButton />
+                    <span>or sort by area:</span>
+                    <select value={userLoc.country} onChange={e => setUserArea({ country: e.target.value })} className="px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs max-w-[11rem]" aria-label="Your country">
+                      <option value="">Choose your country</option>
+                      {COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                    </select>
+                    <input value={userLoc.region} onChange={e => setUserArea({ region: e.target.value })} placeholder="Town or region" className="px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs w-32" aria-label="Your town or region" maxLength={60} />
+                  </>
+                )}
+              </div>
+            )}
           </div>
+
+          {!filtersActive && <ListYourShopCard onStart={openShopSignup} primary={primary} />}
 
           {listingsError && <ErrorNote msg={`Couldn't load listings: ${listingsError}`} />}
 
@@ -367,7 +464,7 @@ export default function Marketplace({
               action={configured ? <button className={primary} onClick={() => setTab('sell')}><Plus className="w-4 h-4" /> Sell an item</button> : undefined}
             />
           ) : filtered.length === 0 ? (
-            <EmptyState icon={Search} title="Nothing matches" body="Try a different search or category." action={<button className={ghostBtn} onClick={() => { setSearch(''); setCategory('All'); }}>Clear filters</button>} />
+            <EmptyState icon={Search} title="Nothing matches" body={group === 'tools' || /meter/i.test(search) ? 'No shop near you lists this tool yet. Try "Everything", clear the filters, or check again soon as shops join.' : 'No shop lists this part yet. Try fewer words, only the part number, or clear the filters.'} action={<button className={ghostBtn} onClick={clearFilters}>Clear filters</button>} />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
               {filtered.map(item => {
@@ -396,17 +493,35 @@ export default function Marketplace({
                       <div className="space-y-2">
                         <div className="flex items-center justify-between gap-2">
                           <span className={`text-[10px] font-bold uppercase tracking-wider ${themeConfig?.accentText || 'text-emerald-600 dark:text-emerald-300'}`}>{item.category}</span>
-                          <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-50">{formatZar(item.price)}</span>
+                          <span className="font-mono font-bold text-base text-slate-900 dark:text-slate-50">{formatZar(item.price, item.currency)}</span>
                         </div>
                         <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 line-clamp-2">{item.title}</h3>
+                        {item.partNumbers.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {item.partNumbers.slice(0, 4).map(pn => <span key={pn} className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-mono text-[10px] text-slate-600 dark:text-slate-300">{pn}</span>)}
+                          </div>
+                        )}
+                        {item.fits.length > 0 && <p className="text-[11px] text-slate-500 line-clamp-1">Fits: {item.fits.join(', ')}</p>}
                         <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-3 leading-relaxed">{item.description}</p>
+                        {(kmById.get(item.id) != null || item.town) && (
+                          <p className="text-[11px] text-slate-500 flex items-center gap-1"><MapPin className="w-3 h-3" />{kmById.get(item.id) != null ? `${formatKm(kmById.get(item.id)!)} away` : ''}{kmById.get(item.id) != null && item.town ? ' · ' : ''}{[item.town, item.province, item.country && item.country !== userLoc.country ? countryName(item.country) : ''].filter(Boolean).join(', ')}</p>
+                        )}
+                        {item.shipsTo.length > 0 && (
+                          <p className="text-[11px] text-emerald-700 dark:text-emerald-300 flex items-center gap-1"><Truck className="w-3 h-3" />
+                            {userLoc.country && item.country !== userLoc.country && shipsToCountry(item, userLoc.country) ? `Ships to ${countryName(userLoc.country)}${item.country ? ` from ${countryName(item.country)}` : ''}` : item.shipsTo.includes('WORLDWIDE') ? 'Ships worldwide' : `Ships to ${item.shipsTo.slice(0, 4).map(countryName).join(', ')}${item.shipsTo.length > 4 ? '…' : ''}`}
+                          </p>
+                        )}
+                        {item.businessId && shopProfiles.get(item.seller.uid) && !mine && (
+                          <ShopActions shop={shopProfiles.get(item.seller.uid)!} partName={item.partNumbers[0] ? `${item.title} (${item.partNumbers[0]})` : item.title} compact />
+                        )}
                       </div>
                       <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-end justify-between gap-3">
                         <button onClick={() => setProfileUid(item.seller.uid)} className="text-left min-w-0 group">
                           <span className="text-[10px] text-slate-400 block">Seller</span>
                           <span className="text-xs font-bold text-slate-700 dark:text-slate-200 group-hover:text-indigo-600 dark:group-hover:text-indigo-300 truncate block">{item.seller.name}</span>
                           <span className="flex items-center gap-1.5 mt-1 flex-wrap">
-                            <SellerBadge verified={item.seller.isVerifiedCompany} type={item.seller.type} />
+                            {item.businessId && !item.seller.isVerifiedCompany && <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-bold"><Store className="w-3 h-3" /> Shop</span>}
+                            {item.businessId && item.seller.isVerifiedCompany ? <VerifiedShopBadge /> : <SellerBadge verified={item.seller.isVerifiedCompany} type={item.seller.type} />}
                             {item.seller.reviewCount > 0 && (
                               <span className="text-[10px] text-slate-500 inline-flex items-center gap-0.5">
                                 <Star className="w-3 h-3 text-amber-400 fill-amber-400" /> {item.seller.rating.toFixed(1)} ({item.seller.reviewCount})
@@ -447,9 +562,9 @@ export default function Marketplace({
 
       {tab === 'sell' &&
         (user ? (
-          <SellPanel uid={user.uid} defaultName={displayNameOf(user)} defaultEmail={user.email || ''} verifiedSellers={verifiedSellers} primary={primary} />
+          <SellPanel uid={user.uid} defaultName={displayNameOf(user)} defaultEmail={user.email || ''} verifiedSellers={verifiedSellers} primary={primary} startAsShop={shopSignup} onShopStarted={() => setShopSignup(false)} />
         ) : (
-          <SignInPrompt what="sell on the marketplace" onOpenAuth={onOpenAuth} primary={primary} />
+          <SignInPrompt what={shopSignup ? 'register your shop' : 'sell on the marketplace'} onOpenAuth={onOpenAuth} primary={primary} />
         ))}
 
       {tab === 'requests' &&
@@ -473,6 +588,42 @@ export default function Marketplace({
           onClose={() => setProfileUid(null)}
         />
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// "List your shop" card (partner options)
+// ---------------------------------------------------------------------------
+
+function ListYourShopCard({ onStart, primary }: { onStart: () => void; primary: string }) {
+  const options: { title: string; price?: string; body: string; soon?: boolean }[] = [
+    { title: 'Individuals', price: 'Free forever', body: 'Selling your own item, like one soldering iron or a kettle? Listing is always free. No plan, no fees.' },
+    { title: 'Business plan', price: BUSINESS_PLAN_PRICE, body: 'For shops and suppliers (local or overseas): shop profile, map pin, WhatsApp and call buttons, shipping countries, and a place in the AI\'s "Where to buy". New shops start on a trial; no payment is taken in the app yet, our team contacts you about the plan.' },
+    { title: 'Featured listing', body: 'Show your shop at the top of searches in your area.', soon: true },
+    { title: 'Guide sponsor', body: 'Your shop on repair guides that use the parts you sell.', soon: true },
+  ];
+  return (
+    <div className={`${cardCls} !rounded-2xl p-4 sm:p-5 space-y-3`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1 max-w-xl">
+          <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2"><Store className="w-5 h-5 text-emerald-600" /> Sell spare parts or tools? List your shop</h2>
+          <p className="text-xs text-slate-500 leading-relaxed">New and used / salvage sellers welcome, from a local shop to an overseas supplier that ships worldwide: donor boards, screens, T-con and power boards, components, meters and soldering gear. People who need that exact part find you and contact you on WhatsApp or by phone.</p>
+        </div>
+        <button type="button" onClick={onStart} className={primary}><Plus className="w-4 h-4" /> Register your shop</button>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+        {options.map(o => (
+          <div key={o.title} className={`rounded-xl border p-3 ${o.soon ? 'border-dashed border-slate-200 dark:border-slate-700 opacity-75' : 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/50 dark:bg-emerald-950/20'}`}>
+            <p className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+              {o.soon ? <Sparkles className="w-3.5 h-3.5 text-amber-500" /> : <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />} {o.title}
+              {o.soon && <span className="ml-auto px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-[9px] font-bold uppercase">Coming soon</span>}
+            </p>
+            {o.price && <p className="text-sm font-bold text-emerald-700 dark:text-emerald-300 mt-1">{o.price}</p>}
+            <p className="text-[11px] text-slate-500 mt-1 leading-snug">{o.body}</p>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -506,7 +657,7 @@ function BuyModal({
   primary: string;
 }) {
   const [contact, setContact] = useState(buyer.email);
-  const [message, setMessage] = useState(`Hi, is the "${item.title}" still available? I'm keen at ${formatZar(item.price)}.`);
+  const [message, setMessage] = useState(`Hi, is the "${item.title}" still available? I'm keen at ${formatZar(item.price, item.currency)}.`);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
@@ -517,7 +668,7 @@ function BuyModal({
     setBusy(true);
     setErr(null);
     try {
-      await createPurchaseRequest({ id: item.id, title: item.title, price: item.price, sellerUid: item.seller.uid }, { uid: buyer.uid, name: buyer.name }, contact, message);
+      await createPurchaseRequest({ id: item.id, title: item.title, price: item.price, currency: item.currency, sellerUid: item.seller.uid }, { uid: buyer.uid, name: buyer.name }, contact, message);
       setSent(true);
     } catch (ex) {
       setErr(friendlyError(ex));
@@ -540,12 +691,12 @@ function BuyModal({
           <div>
             <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 pr-8">Request to buy</h2>
             <p className="text-xs text-slate-500 mt-1">
-              {item.title} · <span className="font-bold">{formatZar(item.price)}</span> from {item.seller.name}
+              {item.title} · <span className="font-bold">{formatZar(item.price, item.currency)}</span> from {item.seller.name}
             </p>
           </div>
           <div>
             <label className={labelCls}>How should the seller reach you?</label>
-            <input required value={contact} onChange={e => setContact(e.target.value)} placeholder="e.g. 082 123 4567 or you@example.co.za" className={inputCls} maxLength={200} />
+            <input required value={contact} onChange={e => setContact(e.target.value)} placeholder="e.g. +44 7700 900123 or you@example.com" className={inputCls} maxLength={200} />
           </div>
           <div>
             <label className={labelCls}>Message</label>
@@ -596,9 +747,13 @@ function SellerProfileModal({
     <Modal onClose={onClose} wide>
       <div className="space-y-5">
         <div className="flex items-start gap-4 pr-8">
+          {profile?.logoUrl ? (
+            <img src={profile.logoUrl} alt={`${name} logo`} className="w-14 h-14 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0" referrerPolicy="no-referrer" />
+          ) : (
           <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-500 text-white flex items-center justify-center text-lg font-bold shrink-0">
-            {type === 'company' ? <Building2 className="w-6 h-6" /> : name.slice(0, 1).toUpperCase()}
+            {profile?.isShop ? <Store className="w-6 h-6" /> : type === 'company' ? <Building2 className="w-6 h-6" /> : name.slice(0, 1).toUpperCase()}
           </div>
+          )}
           <div className="min-w-0 space-y-1">
             <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 truncate">{name}</h2>
             <div className="flex items-center gap-2 flex-wrap">
@@ -617,9 +772,10 @@ function SellerProfileModal({
 
         <div className="flex justify-end -mt-3"><ReportButton targetType="seller" targetId={uid} targetLabel={name} /></div>
         {profile?.bio && <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">{profile.bio}</p>}
+        {profile?.isShop && <ShopDetails shop={profile} />}
         {verified && (
           <p className="text-[11px] text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/40 rounded-xl p-3">
-            This company's registration, tax and address documents were checked and approved by the DIY Electronics team.
+            {profile?.isShop ? "This shop's business registration, phone number and shopfront were checked and approved by the DIY Electronics team." : "This company's registration, tax and address documents were checked and approved by the DIY Electronics team."}
           </p>
         )}
 
@@ -656,7 +812,7 @@ function SellerProfileModal({
                   <img src={l.image} alt="" className="w-full h-20 object-cover" referrerPolicy="no-referrer" />
                   <div className="p-2">
                     <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 line-clamp-1">{l.title}</p>
-                    <p className="text-[11px] font-mono text-slate-500">{formatZar(l.price)}</p>
+                    <p className="text-[11px] font-mono text-slate-500">{formatZar(l.price, l.currency)}</p>
                   </div>
                 </div>
               ))}
@@ -665,6 +821,31 @@ function SellerProfileModal({
         )}
       </div>
     </Modal>
+  );
+}
+
+/** Public shop details: shopfront, address + map, hours, delivery, contact buttons. */
+function ShopDetails({ shop }: { shop: SellerProfile }) {
+  const stock = shop.stockType === 'new' ? 'New parts' : shop.stockType === 'used' ? 'Used / salvage parts' : 'New and used parts';
+  return (
+    <div className="space-y-3">
+      {shop.shopfrontUrl && <img src={shop.shopfrontUrl} alt={`${shop.displayName} shopfront`} className="w-full max-h-56 object-cover rounded-2xl border border-slate-200 dark:border-slate-800" referrerPolicy="no-referrer" loading="lazy" />}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><MapPin className="w-4 h-4 shrink-0 text-slate-400" />{[shop.address, shop.town, shop.province, countryName(shop.country || '')].filter(Boolean).join(', ')}</p>
+        {shop.hours && <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Clock className="w-4 h-4 shrink-0 text-slate-400" />{shop.hours}</p>}
+        <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Package className="w-4 h-4 shrink-0 text-slate-400" />{stock}</p>
+        <p className="flex items-start gap-1.5 text-slate-700 dark:text-slate-200"><Truck className="w-4 h-4 shrink-0 text-slate-400" />
+          {shop.shipsInternationally && shop.shipsTo?.length
+            ? (shop.shipsTo.includes('WORLDWIDE') ? 'Ships worldwide' : `Ships to ${shop.shipsTo.map(countryName).join(', ')}`)
+            : shop.delivery ? 'Delivers / couriers locally' : 'Collection at the shop'}
+        </p>
+        {shop.email && <a href={`mailto:${shop.email}`} className="flex items-start gap-1.5 text-cobalt-600 dark:text-cobalt-300 font-bold break-all">✉ {shop.email}</a>}
+      </div>
+      <ShopActions shop={shop} partName="a part" />
+      {hasCoords(shop) && (
+        <iframe title={`Map of ${shop.displayName}`} src={osmEmbedUrl(shop)} className="w-full h-48 rounded-2xl border border-slate-200 dark:border-slate-800" loading="lazy" />
+      )}
+    </div>
   );
 }
 
@@ -678,22 +859,40 @@ function SellPanel({
   defaultEmail,
   verifiedSellers,
   primary,
+  startAsShop = false,
+  onShopStarted,
 }: {
   uid: string;
   defaultName: string;
   defaultEmail: string;
   verifiedSellers: Map<string, unknown>;
   primary: string;
+  /** Opened from "List your shop": go straight to the shop registration form. */
+  startAsShop?: boolean;
+  onShopStarted?: () => void;
 }) {
   const [profile, setProfile] = useState<SellerProfile | null | undefined>(undefined);
   const [verification, setVerification] = useState<SellerVerification | null | undefined>(undefined);
   const [myListings, setMyListings] = useState<ListingDoc[]>([]);
   const [editingProfile, setEditingProfile] = useState(false);
+  const [shopMode, setShopMode] = useState(false);
   const [listingModal, setListingModal] = useState<{ listing: ListingDoc | null } | null>(null);
 
-  useEffect(() => subscribeSellerProfile(uid, setProfile), [uid]);
+  useEffect(() => subscribeSellerProfile(uid, p => setProfile(p ? { ...p, uid } : p)), [uid]);
   useEffect(() => subscribeMyVerification(uid, setVerification), [uid]);
   useEffect(() => subscribeMyListings(uid, setMyListings), [uid]);
+
+  // "List your shop": open the shop form (new sellers, or sellers who are not a shop yet).
+  useEffect(() => {
+    if (!startAsShop || profile === undefined) return;
+    if (!profile?.isShop) { setShopMode(true); setEditingProfile(true); }
+    onShopStarted?.();
+  }, [startAsShop, profile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep listings' location in step with the shop's address / map pin.
+  useEffect(() => {
+    if (profile?.isShop && !profile.suspended && myListings.length) syncListingLocations(profile, myListings).catch(() => undefined);
+  }, [profile, myListings]);
 
   const isVerified = verifiedSellers.has(uid);
 
@@ -705,15 +904,23 @@ function SellPanel({
     );
   }
 
+  if (profile?.suspended) {
+    return (
+      <EmptyState icon={AlertTriangle} title="This seller account is suspended" body={`An admin suspended this account${profile.suspendedReason ? `: ${profile.suspendedReason}` : '.'} Your listings are hidden. To appeal, email support with your shop name.`} />
+    );
+  }
+
   if (!profile || editingProfile) {
     return (
       <SellerProfileForm
         uid={uid}
         existing={profile}
         defaultName={defaultName}
+        defaultEmail={defaultEmail}
+        startAsShop={shopMode || !!profile?.isShop}
         primary={primary}
-        onDone={() => setEditingProfile(false)}
-        onCancel={profile ? () => setEditingProfile(false) : undefined}
+        onDone={() => { setEditingProfile(false); setShopMode(false); }}
+        onCancel={profile ? () => { setEditingProfile(false); setShopMode(false); } : undefined}
       />
     );
   }
@@ -722,28 +929,41 @@ function SellPanel({
     <div className="space-y-6">
       <div className={`${cardCls} p-5 flex flex-wrap items-center justify-between gap-4`}>
         <div className="flex items-center gap-3 min-w-0">
+          {profile.logoUrl ? (
+            <img src={profile.logoUrl} alt="" className="w-11 h-11 rounded-2xl object-cover shrink-0 border border-slate-200 dark:border-slate-700" referrerPolicy="no-referrer" />
+          ) : (
           <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-600 to-violet-500 text-white flex items-center justify-center shrink-0">
-            {profile.sellerType === 'company' ? <Building2 className="w-5 h-5" /> : <UserIcon className="w-5 h-5" />}
+            {profile.isShop ? <Store className="w-5 h-5" /> : profile.sellerType === 'company' ? <Building2 className="w-5 h-5" /> : <UserIcon className="w-5 h-5" />}
           </div>
+          )}
           <div className="min-w-0">
             <p className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">{profile.displayName}</p>
             <div className="flex items-center gap-2 mt-0.5">
-              <span className="text-[11px] text-slate-500">{profile.sellerType === 'company' ? 'Company seller' : 'Individual seller'}</span>
-              <SellerBadge verified={isVerified} type={profile.sellerType} />
+              <span className="text-[11px] text-slate-500">{profile.isShop ? `Shop · ${[profile.town, countryName(profile.country || '')].filter(Boolean).join(', ')}` : profile.sellerType === 'company' ? 'Company seller' : 'Individual seller'}</span>
+              {profile.isShop && isVerified ? <VerifiedShopBadge /> : <SellerBadge verified={isVerified} type={profile.sellerType} />}
             </div>
           </div>
         </div>
         <div className="flex gap-2">
           <button className={ghostBtn} onClick={() => setEditingProfile(true)}>
-            <Pencil className="w-3.5 h-3.5 inline mr-1" /> Edit profile
+            <Pencil className="w-3.5 h-3.5 inline mr-1" /> {profile.isShop ? 'Edit shop' : 'Edit profile'}
           </button>
+          {!profile.isShop && (
+            <button className={ghostBtn} onClick={() => { setShopMode(true); setEditingProfile(true); }}>
+              <Store className="w-3.5 h-3.5" /> Register as a shop
+            </button>
+          )}
           <button className={primary} onClick={() => setListingModal({ listing: null })}>
             <Plus className="w-4 h-4" /> New listing
           </button>
         </div>
       </div>
 
-      {profile.sellerType === 'company' ? (
+      {profile.isShop && <BusinessPlanCard profile={profile} />}
+
+      {profile.isShop ? (
+        <ShopVerificationPanel profile={profile} verification={verification ?? null} loading={verification === undefined} defaultEmail={defaultEmail} isVerified={isVerified} primary={primary} />
+      ) : profile.sellerType === 'company' ? (
         <VerificationPanel uid={uid} verification={verification ?? null} loading={verification === undefined} defaultEmail={defaultEmail} defaultCompany={profile.displayName} primary={primary} />
       ) : (
         <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900/40 text-xs text-indigo-900 dark:text-indigo-200 flex items-start gap-3">
@@ -757,7 +977,7 @@ function SellPanel({
       <div className="space-y-3">
         <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">My listings ({myListings.length})</h3>
         {myListings.length === 0 ? (
-          <EmptyState icon={Package} title="No listings yet" body="List a tool, test instrument or donor board. Add a clear photo and an honest condition." action={<button className={primary} onClick={() => setListingModal({ listing: null })}><Plus className="w-4 h-4" /> New listing</button>} />
+          <EmptyState icon={Package} title="No listings yet" body={profile.isShop ? 'Add each part or tool you stock. Type its part numbers (e.g. 6870C-0442B, 470uF 25V) so people searching for that exact part find you.' : 'List a tool, test instrument or donor board. Add a clear photo and an honest condition.'} action={<button className={primary} onClick={() => setListingModal({ listing: null })}><Plus className="w-4 h-4" /> New listing</button>} />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {myListings.map(l => (
@@ -785,6 +1005,8 @@ function SellerProfileForm({
   uid,
   existing,
   defaultName,
+  defaultEmail = '',
+  startAsShop = false,
   primary,
   onDone,
   onCancel,
@@ -792,16 +1014,76 @@ function SellerProfileForm({
   uid: string;
   existing: SellerProfile | null;
   defaultName: string;
+  defaultEmail?: string;
+  startAsShop?: boolean;
   primary: string;
   onDone: () => void;
   onCancel?: () => void;
 }) {
-  const [sellerType, setSellerType] = useState<SellerType>(existing?.sellerType || 'individual');
-  const [displayName, setDisplayName] = useState(existing?.displayName || defaultName);
+  type Kind = SellerType | 'shop';
+  const [kind, setKind] = useState<Kind>(startAsShop || existing?.isShop ? 'shop' : existing?.sellerType || 'individual');
+  const [displayName, setDisplayName] = useState(existing?.displayName || (startAsShop ? '' : defaultName));
   const [location, setLocation] = useState(existing?.location || '');
   const [bio, setBio] = useState(existing?.bio || '');
+  // Shop fields
+  const [address, setAddress] = useState(existing?.address || '');
+  const [town, setTown] = useState(existing?.town || '');
+  const [province, setProvince] = useState(existing?.province || '');
+  const [country, setCountry] = useState(existing?.country || guessCountry());
+  const [currency, setCurrency] = useState(existing?.currency || currencyForCountry(existing?.country || guessCountry()));
+  const [pin, setPin] = useState<{ lat: number; lng: number } | null>(hasCoords(existing) ? { lat: existing!.lat as number, lng: existing!.lng as number } : null);
+  const [pinNote, setPinNote] = useState<string | null>(null);
+  const [locating, setLocating] = useState<'gps' | 'address' | null>(null);
+  const [hours, setHours] = useState(existing?.hours || '');
+  const [phone, setPhone] = useState(existing?.phone || '');
+  const [whatsapp, setWhatsapp] = useState(existing?.whatsapp || '');
+  const [email, setEmail] = useState(existing?.email || defaultEmail);
+  const [delivery, setDelivery] = useState(!!existing?.delivery);
+  const [shipsInternationally, setShipsInternationally] = useState(!!existing?.shipsInternationally);
+  const [shipsTo, setShipsTo] = useState<string[]>(existing?.shipsTo?.length ? existing.shipsTo : ['WORLDWIDE']);
+  const [stockType, setStockType] = useState<StockType>(existing?.stockType || 'both');
+  const [registrationNumber, setRegistrationNumber] = useState(existing?.registrationNumber || '');
+  const [logo, setLogo] = useState<{ url: string; path: string }>({ url: existing?.logoUrl || '', path: existing?.logoPath || '' });
+  const [shopfront, setShopfront] = useState<{ url: string; path: string }>({ url: existing?.shopfrontUrl || '', path: existing?.shopfrontPath || '' });
+  const [uploading, setUploading] = useState<{ kind: 'logo' | 'shopfront'; pct: number } | null>(null);
+  const logoRef = useRef<HTMLInputElement>(null);
+  const frontRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const isShop = kind === 'shop';
+
+  const onImage = async (which: 'logo' | 'shopfront', file: File | undefined) => {
+    if (!file) return;
+    setErr(null);
+    setUploading({ kind: which, pct: 0 });
+    try {
+      const res = await uploadShopImage(uid, which, file, pct => setUploading({ kind: which, pct }));
+      (which === 'logo' ? setLogo : setShopfront)({ url: res.url, path: res.path });
+    } catch (ex) {
+      setErr(friendlyError(ex));
+    } finally {
+      setUploading(null);
+    }
+  };
+
+  const useGps = async () => {
+    setLocating('gps'); setPinNote(null);
+    try {
+      const p = await currentPosition(15000);
+      setPin(p);
+      setPinNote('Pin set to where this phone is now. Do this while standing in the shop.');
+    } catch (ex: any) { setPinNote(ex?.message || 'Could not get your location.'); }
+    finally { setLocating(null); }
+  };
+  const findAddress = async () => {
+    setLocating('address'); setPinNote(null);
+    try {
+      const r = await geocodeAddress([address, town, province, countryName(country)].filter(Boolean).join(', '), country);
+      if (r) { setPin({ lat: r.lat, lng: r.lng }); setPinNote(`Found: ${r.label}. Check the pin on the map below.`); }
+      else setPinNote('That address was not found on the map. Check the spelling, or stand in the shop and tap "Use my current location".');
+    } catch (ex: any) { setPinNote(ex?.message || 'The map lookup failed.'); }
+    finally { setLocating(null); }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -809,7 +1091,19 @@ function SellerProfileForm({
     setBusy(true);
     setErr(null);
     try {
-      await saveSellerProfile(uid, { displayName, sellerType, location, bio }, !!existing);
+      await saveSellerProfile(
+        uid,
+        isShop
+          ? {
+              displayName, sellerType: 'company', bio, isShop: true,
+              logoUrl: logo.url, logoPath: logo.path, shopfrontUrl: shopfront.url, shopfrontPath: shopfront.path,
+              address, town, province, country, currency, lat: pin?.lat ?? null, lng: pin?.lng ?? null,
+              hours, phone, whatsapp, email, delivery, stockType, registrationNumber,
+              shipsInternationally, shipsTo: shipsInternationally ? shipsTo : [],
+            }
+          : { displayName, sellerType: kind as SellerType, location, bio, isShop: false },
+        !!existing
+      );
       onDone();
     } catch (ex) {
       setErr(friendlyError(ex));
@@ -818,54 +1112,197 @@ function SellerProfileForm({
     }
   };
 
-  const choice = (type: SellerType, title: string, body: string, Icon: any) => (
+  const choice = (type: Kind, title: string, body: string, Icon: any) => (
     <button
       type="button"
-      onClick={() => setSellerType(type)}
+      onClick={() => setKind(type)}
       className={`text-left p-4 rounded-2xl border-2 transition-all ${
-        sellerType === type
+        kind === type
           ? 'border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/40 shadow-sm shadow-indigo-500/10'
           : 'border-slate-200 dark:border-slate-700 hover:border-indigo-300'
       }`}
     >
       <div className="flex items-center gap-2">
-        <Icon className={`w-5 h-5 ${sellerType === type ? 'text-indigo-600 dark:text-indigo-300' : 'text-slate-400'}`} />
+        <Icon className={`w-5 h-5 ${kind === type ? 'text-indigo-600 dark:text-indigo-300' : 'text-slate-400'}`} />
         <span className="text-sm font-bold text-slate-900 dark:text-slate-100">{title}</span>
-        {sellerType === type && <CheckCircle2 className="w-4 h-4 text-emerald-500 ml-auto" />}
+        {kind === type && <CheckCircle2 className="w-4 h-4 text-emerald-500 ml-auto" />}
       </div>
       <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">{body}</p>
     </button>
   );
 
+  const imagePicker = (which: 'logo' | 'shopfront', label: string, hint: string, value: { url: string }, onClear: () => void, inputRef: React.RefObject<HTMLInputElement | null>) => (
+    <div className="flex gap-3 items-start">
+      <button type="button" onClick={() => inputRef.current?.click()} className={`relative ${which === 'logo' ? 'w-20 h-20' : 'w-32 h-20'} rounded-2xl overflow-hidden border-2 border-dashed border-indigo-300 dark:border-indigo-500/40 bg-indigo-50/50 dark:bg-indigo-950/30 shrink-0 flex items-center justify-center`}>
+        {value.url ? <img src={value.url} alt={label} className="w-full h-full object-cover" /> : <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-300 flex flex-col items-center gap-1"><ImagePlus className="w-5 h-5" /> Add</span>}
+      </button>
+      <input ref={inputRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={e => { onImage(which, e.target.files?.[0]); e.target.value = ''; }} />
+      <div className="text-[11px] text-slate-500 space-y-1 min-w-0">
+        <p className="font-bold text-slate-700 dark:text-slate-200">{label}</p>
+        <p>{hint}</p>
+        {uploading?.kind === which && <div className="space-y-1"><ProgressBar pct={uploading.pct} /><span>Uploading… {uploading.pct}%</span></div>}
+        {value.url && !uploading && <button type="button" className="text-red-600 font-bold" onClick={onClear}>Remove</button>}
+      </div>
+    </div>
+  );
+
   return (
     <form onSubmit={submit} className={`${cardCls} p-6 sm:p-8 space-y-5 max-w-3xl`}>
       <div>
-        <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">{existing ? 'Edit seller profile' : 'Set up your seller profile'}</h2>
-        <p className="text-xs text-slate-500 mt-1">Choose how you sell. You can change this later.</p>
+        <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">{existing ? (isShop ? 'Edit your shop' : 'Edit seller profile') : isShop ? 'Register your shop' : 'Set up your seller profile'}</h2>
+        <p className="text-xs text-slate-500 mt-1">{isShop ? 'Fill in where you are and how to reach you. People who need a part you stock will see your shop with Directions, WhatsApp and Call buttons.' : 'Choose how you sell. You can change this later.'}</p>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         {choice('individual', 'Individual', 'Selling your own tools or spares. No documents needed; listings are reviewed before going live.', UserIcon)}
-        {choice('company', 'Company', 'A registered business. Submit CIPC, SARS and address documents to earn the Verified badge and list instantly.', Building2)}
+        {choice('shop', 'Shop / supplier', `A shop or supplier (local or overseas) selling parts or tools. Address, map pin, WhatsApp, call and shipping. Business plan ${BUSINESS_PLAN_PRICE}, starting with a trial.`, Store)}
+        {choice('company', 'Company', 'A registered business. Submit registration, tax and address documents to earn the Verified badge and list instantly.', Building2)}
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label className={labelCls}>{sellerType === 'company' ? 'Trading name' : 'Display name'}</label>
-          <input required value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder={sellerType === 'company' ? 'e.g. Khanyisa Electronics' : 'e.g. Thabo M.'} className={inputCls} maxLength={80} />
+          <label className={labelCls}>{isShop ? 'Shop name' : kind === 'company' ? 'Trading name' : 'Display name'}</label>
+          <input required value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder={isShop ? 'e.g. City TV Spares' : kind === 'company' ? 'e.g. Bright Electronics Ltd' : 'e.g. Sam K.'} className={inputCls} maxLength={80} />
         </div>
-        <div>
-          <label className={labelCls}>Location (optional)</label>
-          <input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Durban, KZN" className={inputCls} maxLength={80} />
-        </div>
+        {!isShop && (
+          <div>
+            <label className={labelCls}>Location (optional)</label>
+            <input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Nairobi, Kenya" className={inputCls} maxLength={80} />
+          </div>
+        )}
+        {isShop && (
+          <div>
+            <label className={labelCls}>What do you sell?</label>
+            <select value={stockType} onChange={e => setStockType(e.target.value as StockType)} className={inputCls}>
+              <option value="both">New and used parts</option>
+              <option value="new">New parts only</option>
+              <option value="used">Used / salvage parts only (donor boards, screens…)</option>
+            </select>
+          </div>
+        )}
       </div>
       <div>
-        <label className={labelCls}>About (optional)</label>
-        <textarea rows={3} value={bio} onChange={e => setBio(e.target.value)} placeholder="What you repair or stock, collection areas, courier options…" className={inputCls} maxLength={600} />
+        <label className={labelCls}>{isShop ? 'Description' : 'About (optional)'}</label>
+        <textarea rows={3} value={bio} onChange={e => setBio(e.target.value)} placeholder={isShop ? 'What you stock (e.g. TV power boards, T-con boards, LED strips, phone screens), brands, and services' : 'What you repair or stock, collection areas, courier options…'} className={inputCls} maxLength={600} />
       </div>
+
+      {isShop && (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {imagePicker('logo', 'Logo (optional)', 'Square image, JPG, PNG or WebP, up to 5 MB.', logo, () => setLogo({ url: '', path: '' }), logoRef)}
+            {imagePicker('shopfront', 'Shopfront photo', 'The shop entrance with its name visible. Needed for the Verified badge.', shopfront, () => setShopfront({ url: '', path: '' }), frontRef)}
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5" /> Where is the shop?</h3>
+            <div>
+              <label className={labelCls}>Street address</label>
+              <input required value={address} onChange={e => setAddress(e.target.value)} placeholder="e.g. Shop 4, 12 Main Road" className={inputCls} maxLength={300} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className={labelCls}>Town / city</label>
+                <input required value={town} onChange={e => setTown(e.target.value)} placeholder="e.g. Lagos, Leeds, Durban" className={inputCls} maxLength={80} />
+              </div>
+              <div>
+                <label className={labelCls}>State / province / region</label>
+                <input value={province} onChange={e => setProvince(e.target.value)} placeholder="Optional" className={inputCls} maxLength={80} />
+              </div>
+              <div>
+                <label className={labelCls}>Country</label>
+                <select required value={country} onChange={e => { const c = e.target.value; setCountry(c); if (!existing?.currency) setCurrency(currencyForCountry(c)); }} className={inputCls}>
+                  <option value="">Choose a country</option>
+                  {COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={findAddress} disabled={!!locating || address.trim().length < 4} className={ghostBtn}>
+                {locating === 'address' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />} Find this address on the map
+              </button>
+              <button type="button" onClick={useGps} disabled={!!locating} className={ghostBtn}>
+                {locating === 'gps' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <LocateFixed className="w-3.5 h-3.5" />} Use my current location (I'm at the shop)
+              </button>
+              {pin && <button type="button" onClick={() => { setPin(null); setPinNote(null); }} className={`${ghostBtn} !text-red-600`}>Remove pin</button>}
+            </div>
+            {pinNote && <p className="text-[11px] text-slate-500">{pinNote}</p>}
+            {pin ? (
+              <iframe title="Shop location" src={osmEmbedUrl(pin)} className="w-full h-48 rounded-2xl border border-slate-200 dark:border-slate-800" loading="lazy" />
+            ) : (
+              <p className="text-[11px] text-amber-700 dark:text-amber-300">No map pin yet. Without it customers are sorted by country and town only, and Directions use the address text.</p>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400">How customers reach you</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className={labelCls}>Phone</label>
+                <input required type="tel" value={phone} onChange={e => setPhone(e.target.value)} onBlur={() => { const v = toE164(phone); if (v) setPhone(v); }} placeholder="+<country code> number" className={inputCls} maxLength={30} />
+              </div>
+              <div>
+                <label className={labelCls}>WhatsApp number</label>
+                <input type="tel" value={whatsapp} onChange={e => setWhatsapp(e.target.value)} onBlur={() => { const v = toE164(whatsapp); if (v) setWhatsapp(v); }} placeholder="+<country code> number" className={inputCls} maxLength={30} />
+              </div>
+              <div>
+                <label className={labelCls}>Email</label>
+                <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="shop@example.com" className={inputCls} maxLength={160} />
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400 -mt-1">{PHONE_HELP}</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Opening hours</label>
+                <input value={hours} onChange={e => setHours(e.target.value)} placeholder="e.g. Mon–Fri 8:00–17:00, Sat 8:00–13:00" className={inputCls} maxLength={200} />
+              </div>
+              <div>
+                <label className={labelCls}>Business registration number (optional)</label>
+                <input value={registrationNumber} onChange={e => setRegistrationNumber(e.target.value)} placeholder="Your official company number" className={inputCls} maxLength={40} />
+                <p className="text-[10px] text-slate-400 mt-1">{REGISTRATION_HINT}. Needed to apply for the Verified Shop badge.</p>
+              </div>
+            </div>
+            <div className="sm:w-1/2">
+              <label className={labelCls}>Currency for your prices</label>
+              <select value={currency} onChange={e => setCurrency(e.target.value)} className={inputCls}>
+                {[...new Set([currency, ...CURRENCIES])].filter(Boolean).map(c => <option key={c}>{c}</option>)}
+              </select>
+            </div>
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+              <input type="checkbox" checked={delivery} onChange={e => setDelivery(e.target.checked)} className="rounded accent-indigo-600" /> <Truck className="w-4 h-4" /> We deliver / courier parts locally
+            </label>
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
+              <input type="checkbox" checked={shipsInternationally} onChange={e => setShipsInternationally(e.target.checked)} className="rounded accent-indigo-600" /> We ship to other countries (e.g. an overseas supplier)
+            </label>
+            {shipsInternationally && (
+              <div className="pl-6 space-y-2">
+                <div className="flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
+                  <label className="inline-flex items-center gap-1.5"><input type="radio" checked={shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo(['WORLDWIDE'])} className="accent-indigo-600" /> Worldwide</label>
+                  <label className="inline-flex items-center gap-1.5"><input type="radio" checked={!shipsTo.includes('WORLDWIDE')} onChange={() => setShipsTo([])} className="accent-indigo-600" /> Only to these countries</label>
+                </div>
+                {!shipsTo.includes('WORLDWIDE') && (
+                  <>
+                    <select value="" onChange={e => { const c = e.target.value; if (c && !shipsTo.includes(c)) setShipsTo([...shipsTo, c].slice(0, 60)); }} className={inputCls} aria-label="Add a country you ship to">
+                      <option value="">Tap to add a country you ship to…</option>
+                      {COUNTRIES.filter(c => !shipsTo.includes(c.code)).map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                    </select>
+                    <div className="flex flex-wrap gap-1.5">
+                      {shipsTo.map(c => (
+                        <button key={c} type="button" onClick={() => setShipsTo(shipsTo.filter(x => x !== c))} className="px-2 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">{countryName(c)} <X className="w-3 h-3" /></button>
+                      ))}
+                      {shipsTo.length === 0 && <span className="text-[11px] text-amber-700 dark:text-amber-300">Add at least one country, or choose Worldwide.</span>}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            <p className="text-[11px] text-slate-500 bg-slate-50 dark:bg-slate-800/50 rounded-xl p-3">Shops and suppliers are on the Business plan ({BUSINESS_PLAN_PRICE}). You start on a trial; no payment is taken in the app. Our team will contact you about the plan. Selling just your own item? Choose Individual instead: it is free forever.</p>
+          </div>
+        </>
+      )}
+
       <ErrorNote msg={err} />
       <div className="flex justify-end gap-2">
         {onCancel && <button type="button" onClick={onCancel} className={ghostBtn}>Cancel</button>}
-        <button type="submit" disabled={busy} className={primary}>
-          {busy && <Loader2 className="w-4 h-4 animate-spin" />} Save profile
+        <button type="submit" disabled={busy || !!uploading} className={primary}>
+          {busy && <Loader2 className="w-4 h-4 animate-spin" />} {isShop ? (existing?.isShop ? 'Save shop' : 'Register shop') : 'Save profile'}
         </button>
       </div>
     </form>
@@ -903,7 +1340,7 @@ function MyListingRow({ listing, onEdit }: { listing: ListingDoc; onEdit: () => 
           <p className="text-sm font-bold text-slate-900 dark:text-slate-100 line-clamp-1">{listing.title}</p>
           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${statusChip}`}>{statusLabel}</span>
         </div>
-        <p className="text-xs font-mono text-slate-500">{formatZar(listing.price)} · {listing.category}</p>
+        <p className="text-xs font-mono text-slate-500">{formatZar(listing.price, listing.currency)} · {listing.category}</p>
         {listing.status === 'removed' && listing.moderationReason && <p className="text-[11px] text-red-600 dark:text-red-400">Reason: {listing.moderationReason}</p>}
         <div className="flex flex-wrap gap-1.5 pt-1">
           {listing.status !== 'removed' && (
@@ -946,11 +1383,15 @@ function ListingFormModal({
   primary: string;
 }) {
   const [title, setTitle] = useState(listing?.title || '');
-  const [category, setCategory] = useState(listing?.category || 'Test Equipment');
+  const [category, setCategory] = useState(listing?.category || (profile.isShop ? 'Spare Parts' : 'Test Equipment'));
   const [price, setPrice] = useState(listing ? String(listing.price) : '');
   const [condition, setCondition] = useState(listing?.condition || 'Tested Working');
   const [description, setDescription] = useState(listing?.description || '');
   const [inStock, setInStock] = useState(listing?.inStock ?? true);
+  const [partNumbers, setPartNumbers] = useState((listing?.partNumbers || []).join(', '));
+  const [fits, setFits] = useState((listing?.fits || []).join(', '));
+  const [town, setTown] = useState(listing?.town || profile.location || '');
+  const [currency, setCurrency] = useState(listing?.currency || profile.currency || currencyForCountry(profile.country || guessCountry()));
   const [image, setImage] = useState<{ url: string; path: string }>({ url: listing?.imageUrl || '', path: listing?.imagePath || '' });
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -975,15 +1416,18 @@ function ListingFormModal({
     e.preventDefault();
     const p = parseFloat(price);
     if (!title.trim() || !Number.isFinite(p) || p < 0) {
-      setErr('Add a title and a valid price in rand.');
+      setErr('Add a title and a valid price.');
       return;
     }
     setBusy(true);
     setErr(null);
-    const input: ListingInput = { title, category, price: p, condition, description, imageUrl: image.url, imagePath: image.path, inStock };
+    const input: ListingInput = {
+      title, category, price: p, condition, description, imageUrl: image.url, imagePath: image.path, inStock,
+      partNumbers: splitList(partNumbers, 20, 60), fits: splitList(fits, 20, 80), town, currency,
+    };
     try {
-      if (listing) await updateListingContent(listing, profile, input, isVerified);
-      else await createListing({ uid, displayName: profile.displayName, sellerType: profile.sellerType }, input, isVerified);
+      if (listing) await updateListingContent(listing, { ...profile, uid }, input, isVerified);
+      else await createListing({ ...profile, uid }, input, isVerified);
       onClose();
     } catch (ex) {
       setErr(friendlyError(ex));
@@ -1030,8 +1474,26 @@ function ListingFormModal({
 
         <div>
           <label className={labelCls}>Title</label>
-          <input required value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Quick 861DW hot-air rework station, 1000 W" className={inputCls} maxLength={140} />
+          <input required value={title} onChange={e => setTitle(e.target.value)} placeholder={profile.isShop ? 'e.g. LG 42" T-con board 6870C-0442B (used, tested)' : 'e.g. Quick 861DW hot-air rework station, 1000 W'} className={inputCls} maxLength={140} />
         </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Part numbers / other names</label>
+            <input value={partNumbers} onChange={e => setPartNumbers(e.target.value)} placeholder="e.g. 6870C-0442B, T-con, C12, 470uF 25V" className={inputCls} maxLength={800} />
+            <p className="text-[10px] text-slate-400 mt-1">Separate with commas. Type every number printed on the part: this is how people (and the AI's "Where to buy") find it.</p>
+          </div>
+          <div>
+            <label className={labelCls}>Fits brands / models</label>
+            <input value={fits} onChange={e => setFits(e.target.value)} placeholder="e.g. LG 42LB5600, LG 42LN5400" className={inputCls} maxLength={1200} />
+            <p className="text-[10px] text-slate-400 mt-1">Optional. Separate with commas.</p>
+          </div>
+        </div>
+        {!profile.isShop && (
+          <div>
+            <label className={labelCls}>Town (optional)</label>
+            <input value={town} onChange={e => setTown(e.target.value)} placeholder="e.g. Pietermaritzburg" className={inputCls} maxLength={80} />
+          </div>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label className={labelCls}>Category</label>
@@ -1047,10 +1509,12 @@ function ListingFormModal({
             </select>
           </div>
           <div>
-            <label className={labelCls}>Price (ZAR)</label>
-            <div className="relative">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-bold">R</span>
-              <input required type="number" min="0" step="0.01" value={price} onChange={e => setPrice(e.target.value)} placeholder="1 850.00" className={`${inputCls} pl-7`} />
+            <label className={labelCls}>Price</label>
+            <div className="flex gap-1.5">
+              <select value={currency} onChange={e => setCurrency(e.target.value)} className={`${inputCls} !w-24 shrink-0`} aria-label="Currency">
+                {[...new Set([currency, ...CURRENCIES])].filter(Boolean).map(c => <option key={c}>{c}</option>)}
+              </select>
+              <input required type="number" min="0" step="0.01" value={price} onChange={e => setPrice(e.target.value)} placeholder="0.00" className={inputCls} />
             </div>
           </div>
           <div>
@@ -1062,7 +1526,7 @@ function ListingFormModal({
         </div>
         <div>
           <label className={labelCls}>Description</label>
-          <textarea rows={4} value={description} onChange={e => setDescription(e.target.value)} placeholder="Specs, what's included, any faults, collection in Johannesburg or courier via PAXI / The Courier Guy…" className={inputCls} maxLength={4000} />
+          <textarea rows={4} value={description} onChange={e => setDescription(e.target.value)} placeholder="Specs, what's included, any faults, collection or courier options…" className={inputCls} maxLength={4000} />
         </div>
         <label className="flex items-center gap-2 text-xs font-bold text-slate-600 dark:text-slate-300">
           <input type="checkbox" checked={inStock} onChange={e => setInStock(e.target.checked)} className="rounded accent-indigo-600" /> In stock
@@ -1080,6 +1544,96 @@ function ListingFormModal({
 }
 
 // ---------------------------------------------------------------------------
+// Business plan status (USD $20 / month for shops; set by admins, no payments in the app)
+// ---------------------------------------------------------------------------
+
+function BusinessPlanCard({ profile }: { profile: SellerProfile }) {
+  const plan = shopPlan(profile);
+  const tone = plan === 'active' ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/60 dark:bg-emerald-950/20' : plan === 'expired' ? 'border-red-200 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/20' : 'border-indigo-200 dark:border-indigo-900/50 bg-indigo-50/60 dark:bg-indigo-950/20';
+  return (
+    <div className={`rounded-2xl border p-4 text-xs space-y-1 ${tone}`}>
+      <p className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5"><Store className="w-4 h-4" /> Business plan: {PLAN_LABELS[plan]} <span className="font-normal text-slate-500">({BUSINESS_PLAN_PRICE})</span></p>
+      <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+        {plan === 'active' ? 'Your shop is fully listed, including "Where to buy" under AI answers, circuit maps and guides.'
+          : plan === 'expired' ? 'Your plan has expired, so your shop no longer appears in "Where to buy". Your listings stay in the Marketplace. Email support to renew.'
+          : 'You are on a trial with every Business feature. No payment is taken in the app: our team will contact you about the plan.'}
+      </p>
+      {profile.planNote && <p className="text-slate-500">Note from our team: {profile.planNote}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Verified Shop badge (business registration number + phone + shopfront photo)
+// ---------------------------------------------------------------------------
+
+function ShopVerificationPanel({
+  profile,
+  verification,
+  loading,
+  defaultEmail,
+  isVerified,
+  primary,
+}: {
+  profile: SellerProfile;
+  verification: SellerVerification | null;
+  loading: boolean;
+  defaultEmail: string;
+  isVerified: boolean;
+  primary: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  if (loading) return null;
+  const status = verification?.status;
+  const checks = [
+    { ok: (profile.registrationNumber || '').trim().length >= 4, label: 'Business registration number' },
+    { ok: !!toE164(profile.phone || ''), label: 'Shop phone number (with country code)' },
+    { ok: !!profile.shopfrontUrl, label: 'Shopfront photo' },
+  ];
+  const ready = checks.every(c => c.ok);
+  const apply = async () => {
+    setBusy(true); setErr(null);
+    try { await submitShopVerification(profile, defaultEmail, verification); }
+    catch (ex) { setErr(friendlyError(ex)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className={`${cardCls} p-5 space-y-3`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2"><BadgeCheck className="w-5 h-5 text-emerald-600" /> Verified Shop badge</h3>
+          <p className="text-xs text-slate-500 max-w-xl">Verified shops show first in searches and in the AI's "Where to buy", and their listings go live straight away. Our team checks your business registration number on your country's official company register, phones your shop number and looks at your shopfront photo.</p>
+        </div>
+        {status && <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${STATUS_STYLE[status]}`}>{isVerified ? 'Verified' : STATUS_LABELS[status]}</span>}
+      </div>
+      {isVerified || status === 'approved' ? (
+        <p className="text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4" /> Your shop is verified.</p>
+      ) : status === 'submitted' || status === 'under_review' ? (
+        <p className="text-xs text-slate-600 dark:text-slate-300 flex items-center gap-1.5"><Clock className="w-4 h-4" /> Thanks. Our team will check your details and may phone the shop. You will see the badge here when approved.</p>
+      ) : (
+        <>
+          {(status === 'rejected' || status === 'revoked') && verification?.rejectionReason && (
+            <p className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/30 rounded-xl p-3">Reason: {verification.rejectionReason}. Fix it in your shop details, then apply again.</p>
+          )}
+          <ul className="space-y-1">
+            {checks.map(c => (
+              <li key={c.label} className={`text-xs flex items-center gap-1.5 ${c.ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-500'}`}>
+                {c.ok ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4 text-slate-300" />} {c.label}{!c.ok && ' (add it with Edit shop)'}
+              </li>
+            ))}
+          </ul>
+          <ErrorNote msg={err} />
+          <button type="button" disabled={!ready || busy} onClick={apply} className={primary}>
+            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />} Apply for the Verified badge
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Company verification
 // ---------------------------------------------------------------------------
 
@@ -1088,7 +1642,7 @@ function emptyFields(defaultEmail: string, defaultCompany: string): Verification
     companyName: defaultCompany,
     registrationNumber: '',
     vatNumber: '',
-    country: 'South Africa',
+    country: countryName(guessCountry()),
     address: '',
     contactName: '',
     contactEmail: defaultEmail,
@@ -1102,7 +1656,7 @@ function fieldsFrom(v: SellerVerification): VerificationFields {
     companyName: v.companyName || '',
     registrationNumber: v.registrationNumber || '',
     vatNumber: v.vatNumber || '',
-    country: v.country || 'South Africa',
+    country: v.country || '',
     address: v.address || '',
     contactName: v.contactName || '',
     contactEmail: v.contactEmail || '',
@@ -1237,11 +1791,11 @@ function VerificationPanel({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
             <label className={labelCls}>Registered company name</label>
-            <input value={fields.companyName} onChange={set('companyName')} placeholder="e.g. Khanyisa Electronics (Pty) Ltd" className={inputCls} maxLength={160} />
+            <input value={fields.companyName} onChange={set('companyName')} placeholder="e.g. Bright Electronics Ltd" className={inputCls} maxLength={160} />
           </div>
           <div>
-            <label className={labelCls}>CIPC registration number</label>
-            <input value={fields.registrationNumber} onChange={set('registrationNumber')} placeholder="e.g. 2019/123456/07" className={inputCls} maxLength={60} />
+            <label className={labelCls}>Business registration number</label>
+            <input value={fields.registrationNumber} onChange={set('registrationNumber')} placeholder={REGISTRATION_HINT} className={inputCls} maxLength={60} />
           </div>
           <div>
             <label className={labelCls}>VAT number (if registered)</label>
@@ -1250,13 +1804,14 @@ function VerificationPanel({
           <div>
             <label className={labelCls}>Country of registration</label>
             <select value={fields.country} onChange={set('country')} className={inputCls}>
-              {['South Africa', 'Botswana', 'Namibia', 'Lesotho', 'Eswatini', 'Zimbabwe', 'Mozambique', 'Other'].map(c => <option key={c}>{c}</option>)}
+              <option value="">Choose a country</option>
+              {[...new Set([fields.country, ...COUNTRIES.map(c => c.name)])].filter(Boolean).map(c => <option key={c}>{c}</option>)}
             </select>
           </div>
         </div>
         <div>
           <label className={labelCls}>Registered business address</label>
-          <textarea rows={2} value={fields.address} onChange={set('address')} placeholder="e.g. Unit 4, 12 Loop Street, Cape Town City Centre, 8001" className={inputCls} maxLength={400} />
+          <textarea rows={2} value={fields.address} onChange={set('address')} placeholder="Street, town, postcode, country" className={inputCls} maxLength={400} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
@@ -1265,7 +1820,7 @@ function VerificationPanel({
           </div>
           <div>
             <label className={labelCls}>Contact email</label>
-            <input type="email" value={fields.contactEmail} onChange={set('contactEmail')} placeholder="accounts@company.co.za" className={inputCls} maxLength={160} />
+            <input type="email" value={fields.contactEmail} onChange={set('contactEmail')} placeholder="accounts@company.com" className={inputCls} maxLength={160} />
           </div>
           <div>
             <label className={labelCls}>Contact phone</label>
@@ -1373,7 +1928,7 @@ function RequestsPanel({ uid, myName, reviews, primary }: { uid: string; myName:
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="text-sm font-bold text-slate-900 dark:text-slate-100 line-clamp-1">{r.listingTitle}</p>
-                  <p className="text-xs font-mono text-slate-500">{formatZar(r.price)} · {formatTs(r.createdAt)}</p>
+                  <p className="text-xs font-mono text-slate-500">{formatZar(r.price, r.currency)} · {formatTs(r.createdAt)}</p>
                 </div>
                 <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold capitalize shrink-0 ${REQUEST_STYLE[r.status]}`}>{r.status}</span>
               </div>

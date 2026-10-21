@@ -22,6 +22,7 @@ import {
   type SellerType,
   type VerifiedSeller,
 } from './marketplace';
+import { groupOfCategory, isNewCondition, type ListingGroup } from './partsFinder';
 
 export interface ListingItem {
   id: string;
@@ -29,7 +30,7 @@ export interface ListingItem {
   category: string;
   /** Price in ZAR. */
   price: number;
-  currency: 'ZAR';
+  currency: string;
   condition: string;
   seller: {
     uid: string;
@@ -46,6 +47,21 @@ export interface ListingItem {
   hasPhoto: boolean;
   description: string;
   inStock: boolean;
+  /** Part numbers / aliases and models it fits (spare-parts search + "Where to buy"). */
+  partNumbers: string[];
+  fits: string[];
+  keywords: string[];
+  town: string;
+  province: string;
+  country: string;
+  shipsTo: string[];
+  lat: number | null;
+  lng: number | null;
+  /** Seller uid when listed by a registered shop, else ''. */
+  businessId: string;
+  /** New vs used / salvage (from the condition). */
+  isNew: boolean;
+  group: ListingGroup;
 }
 
 /** Neutral placeholder used when a listing has no photo. */
@@ -94,7 +110,7 @@ function rebuild() {
       title: l.title,
       category: l.category,
       price: typeof l.price === 'number' ? l.price : Number(l.price) || 0,
-      currency: 'ZAR',
+      currency: /^[A-Z]{3}$/.test(l.currency || '') ? l.currency : 'ZAR',
       condition: l.condition,
       seller: {
         uid: l.sellerUid,
@@ -108,6 +124,18 @@ function rebuild() {
       hasPhoto: !!l.imageUrl,
       description: l.description || '',
       inStock: l.inStock !== false,
+      partNumbers: Array.isArray(l.partNumbers) ? l.partNumbers : [],
+      fits: Array.isArray(l.fits) ? l.fits : [],
+      keywords: Array.isArray(l.keywords) ? l.keywords : [],
+      town: l.town || '',
+      province: l.province || '',
+      country: l.country || '',
+      shipsTo: Array.isArray(l.shipsTo) ? l.shipsTo : [],
+      lat: typeof l.lat === 'number' ? l.lat : null,
+      lng: typeof l.lng === 'number' ? l.lng : null,
+      businessId: l.businessId || '',
+      isNew: isNewCondition(l.condition),
+      group: groupOfCategory(l.category),
     };
   });
   state = { ...state, listings };

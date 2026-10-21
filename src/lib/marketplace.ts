@@ -20,6 +20,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
@@ -33,6 +34,7 @@ import {
 } from 'firebase/firestore';
 import { getDownloadURL, ref, uploadBytesResumable } from 'firebase/storage';
 import { db, isFirebaseConfigured, storage } from './firebase';
+import { buildKeywords, countryName, currencyForCountry, formatPrice, toE164 } from './partsFinder';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,12 +45,14 @@ export type SellerType = 'individual' | 'company';
 export type VerificationStatus = 'draft' | 'submitted' | 'under_review' | 'approved' | 'rejected' | 'revoked';
 
 export const STANDARD_CATEGORIES = [
+  'Spare Parts',
+  'Boards (Main / PSU / T-con)',
+  'Screens & Panels',
+  'Donor Boards & Parts',
   'Test Equipment',
   'Soldering Stations',
   'Tools',
   'Consumables',
-  'Donor Boards & Parts',
-  'Spare Parts',
   'Used Devices',
 ];
 
@@ -67,14 +71,26 @@ export interface DocTypeDef {
 }
 
 export const VERIFICATION_DOC_TYPES: DocTypeDef[] = [
-  { key: 'registrationCertificate', label: 'Company registration certificate', hint: 'CIPC CoR14.3 / CoR15.1 or equivalent', required: true },
-  { key: 'taxClearance', label: 'Tax clearance / VAT certificate', hint: 'SARS tax compliance status (PIN) or VAT registration', required: true },
+  { key: 'registrationCertificate', label: 'Company registration certificate', hint: 'Official certificate from your country\'s company register (e.g. CIPC, Companies House)', required: true },
+  { key: 'taxClearance', label: 'Tax clearance / VAT certificate', hint: 'Tax compliance letter or VAT / sales-tax registration', required: true },
   { key: 'proofOfAddress', label: 'Proof of business address', hint: 'Utility bill, lease or bank letter, not older than 3 months', required: true },
   { key: 'directorId', label: 'Director ID', hint: 'ID or passport of a listed director', required: true },
   { key: 'tradeLicence', label: 'Trade licence', hint: 'Optional', required: false },
   { key: 'icasaLicence', label: 'ICASA type approval / licence', hint: 'Optional: radios, telecoms, RF gear', required: false },
-  { key: 'importLicence', label: 'Import / export licence', hint: 'Optional: ITAC permit or SARS customs code', required: false },
+  { key: 'importLicence', label: 'Import / export licence', hint: 'Optional: import permit or customs registration', required: false },
 ];
+
+/** Verified Shop badge (spare-parts shops): business registration number + phone on the form, and this one photo. */
+export const SHOP_VERIFICATION_DOC_TYPES: DocTypeDef[] = [
+  { key: 'shopfront', label: 'Shopfront photo', hint: 'The shop entrance with its name visible', required: true },
+];
+
+export type VerificationKind = 'company' | 'shop';
+
+/** Which documents an application needs, by kind. */
+export function docTypesFor(app: { kind?: VerificationKind } | null | undefined): DocTypeDef[] {
+  return app?.kind === 'shop' ? SHOP_VERIFICATION_DOC_TYPES : VERIFICATION_DOC_TYPES;
+}
 
 export const REQUIRED_DOC_KEYS = VERIFICATION_DOC_TYPES.filter(d => d.required).map(d => d.key);
 
@@ -110,16 +126,64 @@ export interface ChecklistEntry {
   matchesCompany: boolean;
 }
 
-export interface SellerProfile {
+export type StockType = 'new' | 'used' | 'both';
+export type ShopPlan = 'trial' | 'active' | 'expired';
+export const BUSINESS_PLAN_PRICE = 'USD $20 per month';
+export const PLAN_LABELS: Record<ShopPlan, string> = { trial: 'Trial', active: 'Business plan active', expired: 'Plan expired' };
+export function shopPlan(p: { plan?: ShopPlan } | null | undefined): ShopPlan {
+  return p?.plan === 'active' || p?.plan === 'expired' ? p.plan : 'trial';
+}
+
+export interface ShopFields {
+  /** A registered spare-parts / tools business (shown as a shop with address, map and contact buttons). */
+  isShop?: boolean;
+  logoUrl?: string;
+  logoPath?: string;
+  shopfrontUrl?: string;
+  shopfrontPath?: string;
+  address?: string;
+  town?: string;
+  /** State / province / region (free text, any country). */
+  province?: string;
+  /** ISO 3166 country code, e.g. "ZA", "GB", "US". */
+  country?: string;
+  /** Default currency for the shop's listings (ISO 4217, e.g. "USD"). */
+  currency?: string;
+  lat?: number | null;
+  lng?: number | null;
+  hours?: string;
+  phone?: string;
+  whatsapp?: string;
+  email?: string;
+  delivery?: boolean;
+  /** Ships to other countries (e.g. an overseas supplier). */
+  shipsInternationally?: boolean;
+  /** Country codes it ships to, or ['WORLDWIDE']. */
+  shipsTo?: string[];
+  stockType?: StockType;
+  /** Business registration number (CIPC, Companies House, EIN…). Optional; needed for the Verified Shop badge. */
+  registrationNumber?: string;
+}
+
+export interface SellerProfile extends ShopFields {
   uid: string;
   displayName: string;
   sellerType: SellerType;
   location?: string;
   bio?: string;
+  // admin-only
+  /** Business plan (USD 20 / month), managed by admins; no payments in the app yet. Missing = trial. */
+  plan?: ShopPlan;
+  planNote?: string;
+  suspended?: boolean;
+  suspendedReason?: string;
+  featured?: boolean;
 }
 
 export interface SellerVerification {
   uid: string;
+  /** 'shop' = Verified Shop (registration number + phone + shopfront photo); missing / 'company' = full company check. */
+  kind?: VerificationKind;
   companyName: string;
   registrationNumber: string;
   vatNumber: string;
@@ -159,13 +223,29 @@ export interface ListingDoc {
   title: string;
   category: string;
   price: number;
-  currency: 'ZAR';
+  /** ISO 4217 currency code (older listings are 'ZAR'). */
+  currency: string;
   condition: string;
   description: string;
   imageUrl: string;
   imagePath: string;
   inStock: boolean;
   status: ListingStatus;
+  /** Part numbers / aliases, e.g. "C12", "470uF 25V", "T-con 6870C-0442B". */
+  partNumbers?: string[];
+  /** Brands / models it fits, e.g. "LG 42LB5600". */
+  fits?: string[];
+  /** Normalised search words (see buildKeywords). */
+  keywords?: string[];
+  town?: string;
+  province?: string;
+  country?: string;
+  /** Country codes the shop ships this to, or ['WORLDWIDE'] (copied from the shop). */
+  shipsTo?: string[];
+  lat?: number | null;
+  lng?: number | null;
+  /** The shop (seller uid) when listed by a registered shop, else ''. */
+  businessId?: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   moderatedBy?: string;
@@ -173,7 +253,37 @@ export interface ListingDoc {
   moderationReason?: string;
 }
 
-export type ListingInput = Pick<ListingDoc, 'title' | 'category' | 'price' | 'condition' | 'description' | 'imageUrl' | 'imagePath' | 'inStock'>;
+export type ListingInput = Pick<ListingDoc, 'title' | 'category' | 'price' | 'condition' | 'description' | 'imageUrl' | 'imagePath' | 'inStock'> & {
+  partNumbers?: string[];
+  fits?: string[];
+  town?: string;
+  currency?: string;
+};
+
+/** Where a listing is: copied from the shop profile (or the individual's location line). */
+export function listingLocationFrom(profile: SellerProfile, town?: string) {
+  const shop = !!profile.isShop;
+  return {
+    town: ((shop ? profile.town : town || profile.location) || '').trim().slice(0, 80),
+    province: (shop ? profile.province || '' : '').slice(0, 80),
+    country: ((shop ? profile.country : '') || '').slice(0, 2),
+    shipsTo: shop && profile.shipsInternationally ? (profile.shipsTo || []).slice(0, 60) : [],
+    lat: shop && typeof profile.lat === 'number' ? profile.lat : null,
+    lng: shop && typeof profile.lng === 'number' ? profile.lng : null,
+    businessId: shop ? profile.uid : '',
+  };
+}
+
+function listingCurrency(input: ListingInput, seller: SellerProfile): string {
+  const c = (input.currency || seller.currency || '').toUpperCase();
+  return /^[A-Z]{3}$/.test(c) ? c : 'USD';
+}
+
+function partFields(input: ListingInput) {
+  const partNumbers = (input.partNumbers || []).map(s => s.trim().slice(0, 60)).filter(Boolean).slice(0, 20);
+  const fits = (input.fits || []).map(s => s.trim().slice(0, 80)).filter(Boolean).slice(0, 20);
+  return { partNumbers, fits, keywords: buildKeywords({ title: input.title, category: input.category, partNumbers, fits, condition: input.condition }) };
+}
 
 export type PurchaseStatus = 'pending' | 'accepted' | 'declined' | 'cancelled' | 'completed';
 
@@ -182,7 +292,7 @@ export interface PurchaseRequest {
   listingId: string;
   listingTitle: string;
   price: number;
-  currency: 'ZAR';
+  currency: string;
   sellerUid: string;
   buyerUid: string;
   buyerName: string;
@@ -233,13 +343,11 @@ export interface Actor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function formatZar(amount: number): string {
-  try {
-    return new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' }).format(amount);
-  } catch {
-    return `R ${amount.toFixed(2)}`;
-  }
+/** Price in its own currency (listings created before currencies were selectable are ZAR). */
+export function formatZar(amount: number, currency = 'ZAR'): string {
+  return formatPrice(amount, currency || 'ZAR');
 }
+export { formatPrice };
 
 export function formatTs(ts?: Timestamp | null): string {
   if (!ts || typeof (ts as any).toDate !== 'function') return '—';
@@ -351,19 +459,110 @@ export function subscribeSellerProfile(uid: string, cb: (p: SellerProfile | null
   );
 }
 
-export async function saveSellerProfile(uid: string, profile: Omit<SellerProfile, 'uid'>, exists: boolean) {
+export async function saveSellerProfile(uid: string, profile: Omit<SellerProfile, 'uid' | 'suspended' | 'suspendedReason' | 'featured'>, exists: boolean) {
   requireFirebase();
-  const data = {
+  const t = (v: string | undefined, n: number) => (v || '').trim().slice(0, n);
+  const num = (v: number | null | undefined, lim: number) => (typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= lim ? Math.round(v * 1e6) / 1e6 : null);
+  const shop = !!profile.isShop;
+  const data: Record<string, unknown> = {
     uid,
-    displayName: profile.displayName.trim().slice(0, 80),
-    sellerType: profile.sellerType,
-    location: (profile.location || '').trim().slice(0, 80),
-    bio: (profile.bio || '').trim().slice(0, 600),
+    displayName: t(profile.displayName, 80),
+    sellerType: shop ? 'company' : profile.sellerType,
+    location: t(shop ? [profile.town, profile.province, countryName(profile.country || '')].filter(Boolean).join(', ') : profile.location, 80),
+    bio: t(profile.bio, 600),
+    isShop: shop,
     updatedAt: serverTimestamp(),
     ...(exists ? {} : { createdAt: serverTimestamp() }),
   };
+  if (shop) {
+    const phone = toE164(profile.phone || '');
+    if (!phone) throw new Error('Type the shop phone number in international format with the country code, e.g. +27 82 123 4567 or +44 7700 900123.');
+    const whatsapp = (profile.whatsapp || '').trim() ? toE164(profile.whatsapp || '') : '';
+    if ((profile.whatsapp || '').trim() && !whatsapp) throw new Error('Type the WhatsApp number in international format with the country code, e.g. +234 803 123 4567.');
+    profile = { ...profile, phone, whatsapp };
+    if (!/^[A-Z]{2}$/.test(profile.country || '')) throw new Error('Choose the country the shop is in.');
+    if (profile.shipsInternationally && !(profile.shipsTo || []).length) throw new Error('Add at least one country you ship to, or choose Worldwide.');
+    if (t(profile.address, 300).length < 6 || !t(profile.town, 80)) throw new Error('Add the street address and town / city so customers can find the shop.');
+    Object.assign(data, {
+      logoUrl: t(profile.logoUrl, 2000), logoPath: t(profile.logoPath, 400),
+      shopfrontUrl: t(profile.shopfrontUrl, 2000), shopfrontPath: t(profile.shopfrontPath, 400),
+      address: t(profile.address, 300), town: t(profile.town, 80), province: t(profile.province, 80),
+      country: profile.country, currency: /^[A-Z]{3}$/.test(profile.currency || '') ? profile.currency : currencyForCountry(profile.country || ''),
+      lat: num(profile.lat, 90), lng: num(profile.lng, 180),
+      hours: t(profile.hours, 200), phone: t(profile.phone, 30), whatsapp: t(profile.whatsapp, 30), email: t(profile.email, 160),
+      delivery: !!profile.delivery,
+      shipsInternationally: !!profile.shipsInternationally,
+      shipsTo: profile.shipsInternationally ? (profile.shipsTo?.length ? profile.shipsTo : ['WORLDWIDE']).filter(c => c === 'WORLDWIDE' || /^[A-Z]{2}$/.test(c)).slice(0, 60) : [],
+      stockType: profile.stockType && ['new', 'used', 'both'].includes(profile.stockType) ? profile.stockType : 'both',
+      registrationNumber: t(profile.registrationNumber, 40),
+    });
+  }
   if (exists) await updateDoc(doc(db, 'sellers', uid), data);
   else await setDoc(doc(db, 'sellers', uid), data);
+}
+
+/** Shop images (logo / shopfront), public: shopImages/{uid}/{ts_name}. */
+export function uploadShopImage(uid: string, kind: 'logo' | 'shopfront', file: File, onProgress?: (pct: number) => void): Promise<{ url: string; path: string; name: string; size: number; contentType: string }> {
+  requireFirebase();
+  const err = validateImageFile(file);
+  if (err) return Promise.reject(new Error(err));
+  const path = `shopImages/${uid}/${kind}_${Date.now()}_${safeFileName(file.name)}`;
+  const task = uploadBytesResumable(ref(storage, path), file, { contentType: file.type, cacheControl: 'public, max-age=31536000' });
+  return new Promise((resolve, reject) => {
+    task.on(
+      'state_changed',
+      snap => onProgress?.(snap.totalBytes ? Math.round((snap.bytesTransferred / snap.totalBytes) * 100) : 0),
+      e => reject(new Error(friendlyError(e))),
+      async () => {
+        try {
+          resolve({ url: await getDownloadURL(task.snapshot.ref), path, name: file.name, size: file.size, contentType: file.type });
+        } catch (e) {
+          reject(new Error(friendlyError(e)));
+        }
+      }
+    );
+  });
+}
+
+/** After a shop moves, copy its location onto its listings (location-only update, no re-review). */
+export async function syncListingLocations(profile: SellerProfile, listings: ListingDoc[]) {
+  if (!isFirebaseConfigured || !profile.isShop) return;
+  const loc = listingLocationFrom(profile);
+  const batch = writeBatch(db);
+  let n = 0;
+  for (const l of listings) {
+    if (l.status === 'removed') continue;
+    if (l.town === loc.town && l.province === loc.province && (l.country || '') === loc.country && (l.shipsTo || []).join(',') === loc.shipsTo.join(',') && l.lat === loc.lat && l.lng === loc.lng && l.businessId === loc.businessId) continue;
+    batch.update(doc(db, 'listings', l.id), { ...loc, updatedAt: serverTimestamp() });
+    if (++n >= 400) break;
+  }
+  if (n) await batch.commit();
+}
+
+/** Apply for the Verified Shop badge: business registration number, phone and the shopfront photo from the profile. */
+export async function submitShopVerification(profile: SellerProfile, contactEmail: string, existing: SellerVerification | null) {
+  requireFirebase();
+  if (existing && (existing.status === 'approved' || existing.status === 'under_review')) {
+    throw new Error('Your application is under review or already approved.');
+  }
+  const regNo = (profile.registrationNumber || '').trim();
+  if (regNo.length < 4) throw new Error('Add your business registration number to the shop profile first (CIPC, Companies House, EIN or your country\'s equivalent).');
+  if ((profile.phone || '').trim().length < 6) throw new Error('Add the shop phone number first.');
+  if (!profile.shopfrontPath || !profile.shopfrontUrl) throw new Error('Add a shopfront photo to the shop profile first.');
+  const fields: VerificationFields = {
+    companyName: profile.displayName,
+    registrationNumber: regNo,
+    vatNumber: '',
+    country: countryName(profile.country || '') || profile.country || '',
+    address: [profile.address, profile.town, profile.province].filter(Boolean).join(', '),
+    contactName: profile.displayName,
+    contactEmail: (profile.email || contactEmail || '').trim(),
+    contactPhone: (profile.phone || '').trim(),
+    documents: {
+      shopfront: { path: profile.shopfrontPath, name: 'Shopfront photo', contentType: 'image/jpeg', size: 0, uploadedAt: Date.now() },
+    },
+  };
+  await saveVerification(profile.uid, fields, true, existing, 'shop');
 }
 
 export function subscribeMyVerification(uid: string, cb: (v: SellerVerification | null) => void, onError?: (e: unknown) => void) {
@@ -386,7 +585,7 @@ export function missingRequiredDocs(docs: Record<string, StoredDoc>): DocTypeDef
 }
 
 /** Save a draft or submit the application. `existing` is the current doc (or null). */
-export async function saveVerification(uid: string, fields: VerificationFields, submit: boolean, existing: SellerVerification | null) {
+export async function saveVerification(uid: string, fields: VerificationFields, submit: boolean, existing: SellerVerification | null, kind: VerificationKind = 'company') {
   requireFirebase();
   if (existing && (existing.status === 'approved' || existing.status === 'under_review')) {
     throw new Error('This application is locked while it is under review or approved.');
@@ -402,7 +601,7 @@ export async function saveVerification(uid: string, fields: VerificationFields, 
     contactPhone: fields.contactPhone.trim().slice(0, 40),
     documents: fields.documents,
   };
-  if (submit) {
+  if (submit && kind === 'company') {
     const missing = missingRequiredDocs(clean.documents);
     if (missing.length) throw new Error(`Upload the required documents first: ${missing.map(m => m.label).join(', ')}.`);
     if (clean.companyName.length < 2 || clean.registrationNumber.length < 4 || clean.address.length < 6 || clean.contactEmail.length < 4) {
@@ -413,6 +612,7 @@ export async function saveVerification(uid: string, fields: VerificationFields, 
   const base = {
     ...clean,
     uid,
+    kind,
     status: (submit ? 'submitted' : 'draft') as VerificationStatus,
     updatedAt: serverTimestamp(),
     ...(submit ? { submittedAt: serverTimestamp(), submissionCount: (existing?.submissionCount || 0) + 1 } : {}),
@@ -493,7 +693,7 @@ export function subscribeAllListings(cb: (l: ListingDoc[]) => void, onError?: (e
 }
 
 export async function createListing(
-  seller: { uid: string; displayName: string; sellerType: SellerType },
+  seller: SellerProfile,
   input: ListingInput,
   isVerified: boolean
 ) {
@@ -508,12 +708,14 @@ export async function createListing(
     title: input.title.trim().slice(0, 140),
     category: input.category,
     price: Math.round(input.price * 100) / 100,
-    currency: 'ZAR',
+    currency: listingCurrency(input, seller),
     condition: input.condition,
     description: input.description.trim().slice(0, 4000),
     imageUrl: input.imageUrl,
     imagePath: input.imagePath,
     inStock: input.inStock,
+    ...partFields(input),
+    ...listingLocationFrom(seller, input.town),
     status: isVerified ? 'active' : 'pending',
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -522,7 +724,7 @@ export async function createListing(
 
 export async function updateListingContent(
   listing: ListingDoc,
-  seller: { displayName: string; sellerType: SellerType },
+  seller: SellerProfile,
   input: ListingInput,
   isVerified: boolean
 ) {
@@ -536,11 +738,14 @@ export async function updateListingContent(
     title: input.title.trim().slice(0, 140),
     category: input.category,
     price: Math.round(input.price * 100) / 100,
+    currency: listingCurrency(input, seller),
     condition: input.condition,
     description: input.description.trim().slice(0, 4000),
     imageUrl: input.imageUrl,
     imagePath: input.imagePath,
     inStock: input.inStock,
+    ...partFields(input),
+    ...listingLocationFrom(seller, input.town),
     status: isVerified ? 'active' : 'pending',
     updatedAt: serverTimestamp(),
   });
@@ -559,7 +764,7 @@ export async function deleteListing(id: string) {
 // ---------------------------------------------------------------------------
 
 export async function createPurchaseRequest(
-  listing: { id: string; title: string; price: number; sellerUid: string },
+  listing: { id: string; title: string; price: number; currency?: string; sellerUid: string },
   buyer: { uid: string; name: string },
   contact: string,
   message: string
@@ -570,7 +775,7 @@ export async function createPurchaseRequest(
     listingId: listing.id,
     listingTitle: listing.title.slice(0, 140),
     price: listing.price,
-    currency: 'ZAR',
+    currency: /^[A-Z]{3}$/.test(listing.currency || '') ? listing.currency : 'ZAR',
     sellerUid: listing.sellerUid,
     buyerUid: buyer.uid,
     buyerName: buyer.name.slice(0, 80) || 'Buyer',
@@ -790,4 +995,99 @@ export async function adminLogDocumentOpened(app: SellerVerification, docKey: st
   const batch = writeBatch(db);
   batch.set(auditRef(), auditData(actor, 'verification.open_document', 'sellerVerification', app.uid, app.companyName || app.uid, docKey));
   await batch.commit().catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Admin: shops (suspend / restore, reports)
+// ---------------------------------------------------------------------------
+
+export function subscribeShops(cb: (s: SellerProfile[]) => void, onError?: (e: unknown) => void) {
+  return onSnapshot(
+    query(collection(db, 'sellers'), where('isShop', '==', true), limit(500)),
+    snap => {
+      const out: SellerProfile[] = [];
+      snap.forEach(d => out.push({ ...(d.data() as SellerProfile), uid: d.id }));
+      cb(out.sort((a, b) => Number(!!b.suspended) - Number(!!a.suspended) || a.displayName.localeCompare(b.displayName)));
+    },
+    e => onError?.(e)
+  );
+}
+
+export interface SellerReport { id: string; targetId: string; targetLabel: string; reason: string; details: string; status: string; createdAt?: Timestamp }
+
+export function subscribeSellerReports(cb: (r: SellerReport[]) => void, onError?: (e: unknown) => void) {
+  return onSnapshot(
+    query(collection(db, 'reports'), where('targetType', '==', 'seller'), limit(500)),
+    snap => {
+      const out: SellerReport[] = [];
+      snap.forEach(d => out.push({ ...(d.data() as SellerReport), id: d.id }));
+      cb(out.sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt)));
+    },
+    e => onError?.(e)
+  );
+}
+
+export async function adminCloseReports(ids: string[], actor: Actor, shopName: string, shopUid: string) {
+  const batch = writeBatch(db);
+  ids.slice(0, 400).forEach(id => batch.update(doc(db, 'reports', id), { status: 'closed' }));
+  batch.set(auditRef(), auditData(actor, 'reports.close', 'seller', shopUid, shopName, `${ids.length} report(s)`));
+  await batch.commit();
+}
+
+const SUSPEND_PREFIX = 'Shop suspended';
+
+/** Suspend a shop: hides its profile and takes its live listings down (restored on unsuspend). */
+export async function adminSetShopSuspended(shop: SellerProfile, suspended: boolean, actor: Actor, reason = '') {
+  if (suspended && !reason.trim()) throw new Error('A reason is required.');
+  const listingsSnap = await getDocs(query(collection(db, 'listings'), where('sellerUid', '==', shop.uid)));
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'sellers', shop.uid), {
+    suspended,
+    suspendedReason: suspended ? reason.trim().slice(0, 1000) : '',
+    moderatedBy: actor.uid,
+    moderatedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  let n = 0;
+  listingsSnap.forEach(d => {
+    const l = d.data() as ListingDoc;
+    if (n >= 450) return;
+    if (suspended && l.status === 'active') {
+      batch.update(d.ref, { status: 'removed', moderatedBy: actor.uid, moderatedAt: serverTimestamp(), moderationReason: `${SUSPEND_PREFIX}: ${reason.trim()}`.slice(0, 1000), updatedAt: serverTimestamp() });
+      n++;
+    } else if (!suspended && l.status === 'removed' && (l.moderationReason || '').startsWith(SUSPEND_PREFIX)) {
+      batch.update(d.ref, { status: 'active', moderatedBy: actor.uid, moderatedAt: serverTimestamp(), moderationReason: '', updatedAt: serverTimestamp() });
+      n++;
+    }
+  });
+  batch.set(auditRef(), auditData(actor, suspended ? 'shop.suspend' : 'shop.unsuspend', 'seller', shop.uid, shop.displayName, reason));
+  await batch.commit();
+}
+
+/** Revoke a shop's Verified badge from the Shops tab (same effect as Revoke in the verification queue). */
+export async function adminRevokeShopBadge(uid: string, actor: Actor, reason: string) {
+  const snap = await getDoc(doc(db, 'sellerVerifications', uid));
+  if (!snap.exists()) {
+    // Badge without an application (legacy): just remove the badge.
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'verifiedSellers', uid));
+    batch.set(auditRef(), auditData(actor, 'verification.revoke', 'sellerVerification', uid, uid, reason));
+    await batch.commit();
+    return;
+  }
+  await adminSetVerificationStatus({ ...(snap.data() as SellerVerification), uid }, 'revoked', actor, { reason });
+}
+
+/** Set a shop's Business plan status (admin only; no payment is taken in the app). */
+export async function adminSetShopPlan(shop: SellerProfile, plan: ShopPlan, actor: Actor, note = '') {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'sellers', shop.uid), {
+    plan,
+    planNote: note.trim().slice(0, 300),
+    moderatedBy: actor.uid,
+    moderatedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  batch.set(auditRef(), auditData(actor, `shop.plan_${plan}`, 'seller', shop.uid, shop.displayName, note));
+  await batch.commit();
 }

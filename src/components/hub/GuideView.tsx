@@ -1,6 +1,7 @@
 // Guide page: /guides/view/:id — numbered steps with images, tools & parts (fix kit) with shop links,
 // difficulty / time, "I fixed it" counter, comments on every step and on the whole guide.
 import { useEffect, useMemo, useState } from 'react';
+import { WhereToBuy } from '../PartsFinderPanels';
 import { TranslatableVideo } from '../VideoTranslator';
 import { USER_CONTENT_NOTE } from '../../config/policy';
 import { Clock, CheckCircle2, MessageSquare, Pencil, Trash2, Wrench, Package, AlertTriangle, ShieldOff, ArrowLeft, X, Share2, Check } from 'lucide-react';
@@ -146,6 +147,9 @@ export default function GuideView({ onOpenAuth }: { onOpenAuth?: () => void }) {
         </section>
       ) : null}
 
+      {(guide.tools.length > 0 || guide.parts.length > 0) && (
+        <WhereToBuy text={[...guide.parts, ...guide.tools].join('\n')} max={4} />
+      )}
       {(guide.tools.length > 0 || guide.parts.length > 0) && (
         <div className="grid md:grid-cols-2 gap-4">
           {guide.parts.length > 0 && (
