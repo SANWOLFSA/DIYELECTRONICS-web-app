@@ -18,7 +18,7 @@ export interface ChatRequestBody {
 }
 export interface ChatResult { text: string; board?: any; ttftMs?: number; cached?: boolean; model?: string }
 
-const CACHE_KEY = 'diy_ai_answer_cache_v1';
+const CACHE_KEY = 'diy_ai_answer_cache_v2'; // v2: answers use the Solution A/B/C format
 const CACHE_MAX = 60;
 
 function hash(s: string): string {

@@ -1,3 +1,4 @@
+import type { EscalationStage } from '../../lib/escalation';
 // Normalised device catalog used by the routed Devices drill-down.
 // Device type > Brand > Model > (Size) > Solutions
 
@@ -90,4 +91,6 @@ export interface Solution {
   brandNote?: string;
   sizeNote?: string;
   source: 'library' | 'model-notes';
+  /** The same fix laid out as Solution A -> B -> C (see lib/escalation.ts). */
+  escalation?: EscalationStage[];
 }

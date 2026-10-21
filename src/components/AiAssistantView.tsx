@@ -87,7 +87,15 @@ export default function AiAssistantView() {
   const [activePersonaId, setActivePersonaId] = useState('sanwolf');
   const activePersona = PERSONAS.find(p => p.id === activePersonaId) || PERSONAS[0];
   const [messages, setMessages] = useState<Message[]>(() => loadConversation(activePersona.id, activePersona.greeting));
-  const [input, setInput] = useState('');
+  // "Ask AI" buttons on fix guides open this page with ?ask=<problem>: type it in, the user presses send.
+  const [input, setInput] = useState(() => {
+    try {
+      const url = new URL(window.location.href);
+      const ask = url.searchParams.get('ask') || '';
+      if (ask) { url.searchParams.delete('ask'); window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash); }
+      return ask.slice(0, 1500);
+    } catch { return ''; }
+  });
   const [isGenerating, setIsGenerating] = useState(false);
   const [pending, setPending] = useState<{ id: string; img: PreparedImage; thumb: string; kind: 'photo' | 'frame' }[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);

@@ -11,6 +11,8 @@ import {
   CATALOG, CATALOG_STATS, GROUP_ORDER, findType, findBrand, findModel, findSize, searchCatalog,
   type CatalogDeviceType, type CatalogBrand, type CatalogModel, type CatalogSize, type Solution,
 } from '../data/catalog';
+import EscalationSolutions from './EscalationSolutions';
+import { askAiPrompt } from '../lib/escalation';
 import { loadSolutions } from '../data/solutions';
 import { usePathname, navigate, RouteLink } from '../hooks/usePathname';
 import BrandLogo from './catalog/BrandLogo';
@@ -570,11 +572,21 @@ function SolutionDetail({ solution: s, all, solutionsUrl, type, brand, model, si
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
-          {s.causes.length > 0 && (
+          {s.escalation && s.escalation.length > 0 && (
+            <Section icon={<Wrench className="w-4 h-4 text-emerald-600" />} title="Fix it step by step">
+              <EscalationSolutions
+                stages={s.escalation}
+                meterHint={METER}
+                askPrompt={askAiPrompt({ device: `${brand.name} ${model.name}${size ? ` (${size.name})` : ''} ${type.name}`, problem: `${s.title}. ${s.symptom}`, tried: s.escalation })}
+              />
+            </Section>
+          )}
+          {!s.escalation?.length && s.causes.length > 0 && (
             <Section icon={<AlertTriangle className="w-4 h-4 text-amber-500" />} title="Likely causes">
               <ul className="space-y-1.5">{s.causes.map((c, i) => <li key={i} className="text-xs text-stone-700 dark:text-stone-300 flex gap-2"><span className="text-amber-500 font-bold">•</span>{c}</li>)}</ul>
             </Section>
           )}
+          {!s.escalation?.length && (<>
           <Section icon={<Gauge className="w-4 h-4 text-blue-600" />} title="Test & diagnose">
             <ol className="space-y-2.5">
               {s.tests.map((t, i) => (
@@ -594,6 +606,7 @@ function SolutionDetail({ solution: s, all, solutionsUrl, type, brand, model, si
               ))}
             </ol>
           </Section>
+          </>)}
           {(s.brandNote || s.sizeNote) && (
             <Section icon={<Lightbulb className="w-4 h-4 text-teal-600" />} title={`${brand.name}${size ? ` · ${size.name}` : ''} specifics`}>
               {s.brandNote && <p className="text-xs text-stone-700 dark:text-stone-300 leading-relaxed">{s.brandNote}</p>}

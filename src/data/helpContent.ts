@@ -10,6 +10,13 @@ export const HELP_TOPICS: HelpTopic[] = [
     'When you name a board or model number, real board photos and listings found online (iFixit, Wikipedia, Wikimedia Commons) appear under the answer with their sources.',
     'Tap the expand icon (top right) for full screen. "New chat" starts over. AI answers can be wrong: always confirm with your meter and the service manual.',
   ] },
+  { id: 'fix-format', title: 'How fixes are laid out (Solution A, B, C)', steps: [
+    'Every fix in the app (device solutions, the AI diagnostic tool, phone fixes and AI chat answers) starts with Solution A: the easiest and most likely fix. Do its numbered steps in order.',
+    'Each step has a bold action title and one or two plain sentences telling you exactly what to do, where to touch, what you should see, and why.',
+    'If Solution A did not fix it, move down to "If A didn\'t work: Solution B", then "If B didn\'t work: Solution C".',
+    'Still not fixed? Tap "Ask AI" under Solution C. The AI Assistant opens with your problem already typed in: add what happened at each step (or a photo) and press send. The AI will also tell you when a professional repair is the safer choice.',
+    'Always read the red Safety box first and follow it.',
+  ] },
   { id: 'circuit-map', title: 'Map a circuit (red-flashing parts to test)', steps: [
     'In the AI Assistant tap + then "Map circuit".',
     'Either type a board or model number (e.g. "Samsung UA43") or attach a clear photo of the board, then tap the map button. Add the fault if you know it.',

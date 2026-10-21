@@ -4,6 +4,9 @@ import { db } from '../lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
 import { Smartphone, Zap, Search, AlertTriangle, Sparkles, CheckCircle2, ChevronDown, Wand2, FileText } from 'lucide-react';
 import Markdown from 'react-markdown';
+import { Bot } from 'lucide-react';
+import { RouteLink } from '../hooks/usePathname';
+import { askAiPrompt, askAiUrl } from '../lib/escalation';
 import type { ThemeConfig } from '../lib/theme';
 
 const BRANDS = [
@@ -34,6 +37,7 @@ export default function PhonesPage({ themeConfig, onNavigateTo3D }: { themeConfi
   const [customSymptom, setCustomSymptom] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [askedIssue, setAskedIssue] = useState('');
   const [isAiGenerated, setIsAiGenerated] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,6 +49,7 @@ export default function PhonesPage({ themeConfig, onNavigateTo3D }: { themeConfi
     }
     
     const issueToSearch = customSymptom.trim() || selectedIssue;
+    setAskedIssue(issueToSearch);
     if (!issueToSearch) {
       setError("Please select an issue or type a custom symptom.");
       return;
@@ -76,7 +81,8 @@ export default function PhonesPage({ themeConfig, onNavigateTo3D }: { themeConfi
         setIsAiGenerated(true);
         const prompt = `Write a step-by-step repair guide and troubleshooting steps for:
 Brand/Model: ${selectedBrand}
-Issue: ${issueToSearch}`;
+Issue: ${issueToSearch}
+Use the Solution A -> If A didn't work: Solution B -> If B didn't work: Solution C -> Still not fixed? format, with a bold action title and plain beginner-friendly sentences for every step.`;
 
         const res = await aiFetch('/api/chat', {
           method: 'POST',
@@ -263,6 +269,15 @@ Issue: ${issueToSearch}`;
           
           <div className="p-6 md:p-8 prose prose-slate dark:prose-invert max-w-none prose-headings:font-bold prose-headings:tracking-tight prose-h2:text-xl prose-h2:text-slate-900 dark:prose-h2:text-white prose-p:text-slate-700 dark:prose-p:text-slate-300 prose-p:text-sm prose-li:text-sm prose-strong:text-slate-900 dark:prose-strong:text-white">
             <Markdown>{result}</Markdown>
+          </div>
+          <div className="mx-5 mb-5 rounded-2xl border border-cobalt-200 dark:border-cobalt-500/30 bg-cobalt-50 dark:bg-cobalt-500/10 p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-slate-900 dark:text-white">Still not fixed? Ask the AI technician</p>
+              <p className="text-xs text-slate-600 dark:text-slate-300">Tell it what happened at each step, or send a photo, and it will guide you further.</p>
+            </div>
+            <RouteLink to={askAiUrl(askAiPrompt({ device: selectedBrand, problem: askedIssue || 'My phone has a problem' }))} className="shrink-0 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-cobalt-600 hover:bg-cobalt-500 text-white text-xs font-bold no-underline">
+              <Bot className="w-4 h-4" /> Ask AI
+            </RouteLink>
           </div>
         </div>
       )}

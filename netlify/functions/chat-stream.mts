@@ -1,7 +1,8 @@
 // Streaming AI chat for /api/chat-stream (Netlify Functions v2 can stream a Response body;
 // the Express app in api.ts is wrapped by serverless-http, which buffers the whole answer).
 // The chat logic itself lives in server.ts (prepareChat / streamChat) so local dev and
-// production behave the same. Events are newline-delimited JSON.
+// production behave the same (including the system prompt, so the Solution A/B/C answer format
+// in SOLUTION_FORMAT applies here too). Events are newline-delimited JSON.
 type Context = { ip?: string };
 
 process.env.NETLIFY = process.env.NETLIFY || 'true'; // server.ts must not start its own HTTP server here
