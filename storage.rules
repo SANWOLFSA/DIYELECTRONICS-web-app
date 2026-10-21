@@ -55,6 +55,17 @@ service firebase.storage {
       allow delete: if isOwner(uid) || isAdmin();
     }
 
+    // --- Spare-parts shop logo & shopfront photos (PUBLIC read) --------
+    // shopImages/{uid}/{fileName}: JPG/PNG/WebP, max 5 MB, owner only.
+    // (Part and tool photos use listingImages/{uid}/... above.)
+    match /shopImages/{uid}/{fileName} {
+      allow read: if true;
+      allow create, update: if isOwner(uid)
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
     // --- Personal file storage (FileStorageManager) --------------------
     match /users/{uid}/files/{allPaths=**} {
       allow read, delete: if isOwner(uid);

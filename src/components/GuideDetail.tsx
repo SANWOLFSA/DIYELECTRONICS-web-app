@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
+import { WhereToBuy } from './PartsFinderPanels';
 import { 
   X, Clock, Leaf, ArrowLeft, ArrowRight, 
   CheckCircle, ShieldAlert, Award, Bookmark, BookmarkCheck,
@@ -264,6 +265,10 @@ export default function GuideDetail({
                     ))}
                   </div>
                 </div>
+              )}
+
+              {guide.partsRequired && guide.partsRequired.length > 0 && (
+                <WhereToBuy text={guide.partsRequired.map(p => `${p.name} ${p.partNumber}`).join('\n')} />
               )}
 
               <AiProTipsPanel

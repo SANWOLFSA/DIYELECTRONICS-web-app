@@ -183,27 +183,89 @@ service cloud.firestore {
       return c in ['Bulk & Wholesale', 'New Stock (Business)'];
     }
 
-    // --- 5a. Public seller profile ------------------------------------
+    // True when sellers/{uid} is a shop an admin has suspended.
+    function isSuspendedSeller(uid) {
+      return exists(/databases/$(database)/documents/sellers/$(uid))
+        && get(/databases/$(database)/documents/sellers/$(uid)).data.get('suspended', false) == true;
+    }
+
+    function optString(d, k, maxLen) {
+      return !(k in d) || isTrimmedString(d[k], maxLen);
+    }
+
+    function optCoord(d, k, lim) {
+      return !(k in d) || d[k] == null || ((d[k] is float || d[k] is int) && d[k] >= -lim && d[k] <= lim);
+    }
+
+    // --- 5a. Public seller profile (individuals, companies and spare-parts shops) ---
+    // Shops (isShop == true) add address, map pin, hours and contact fields.
+    // suspended / suspendedReason / featured are written by admins only.
+    // Suspended profiles are hidden from everyone but the owner and admins.
     match /sellers/{uid} {
+      function ownerKeys() {
+        return ['uid', 'displayName', 'sellerType', 'location', 'bio', 'createdAt', 'updatedAt',
+                'isShop', 'logoUrl', 'logoPath', 'shopfrontUrl', 'shopfrontPath', 'address', 'town',
+                'province', 'country', 'currency', 'lat', 'lng', 'hours', 'phone', 'whatsapp', 'email',
+                'delivery', 'shipsInternationally', 'shipsTo', 'stockType', 'registrationNumber'];
+      }
+
+      function adminKeys() {
+        return ['suspended', 'suspendedReason', 'featured', 'plan', 'planNote', 'moderatedBy', 'moderatedAt', 'updatedAt'];
+      }
+
       function validSeller(d) {
         return d.uid == uid
           && d.sellerType in ['individual', 'company']
           && isNonEmptyString(d.displayName, 80)
           && isTrimmedString(d.get('location', ''), 80)
-          && isTrimmedString(d.get('bio', ''), 600);
+          && isTrimmedString(d.get('bio', ''), 600)
+          && (!('isShop' in d) || d.isShop is bool)
+          && optString(d, 'logoUrl', 2000) && optString(d, 'logoPath', 400)
+          && optString(d, 'shopfrontUrl', 2000) && optString(d, 'shopfrontPath', 400)
+          && optString(d, 'address', 300) && optString(d, 'town', 80) && optString(d, 'province', 80)
+          && (!('country' in d) || d.country == '' || (d.country is string && d.country.matches('^[A-Z]{2}$')))
+          && (!('currency' in d) || (d.currency is string && d.currency.matches('^[A-Z]{3}$')))
+          && (!('shipsInternationally' in d) || d.shipsInternationally is bool)
+          && (!('shipsTo' in d) || (d.shipsTo is list && d.shipsTo.size() <= 60))
+          && optCoord(d, 'lat', 90) && optCoord(d, 'lng', 180)
+          && optString(d, 'hours', 200) && optString(d, 'phone', 30) && optString(d, 'whatsapp', 30)
+          && optString(d, 'email', 160) && optString(d, 'registrationNumber', 40)
+          && (!('delivery' in d) || d.delivery is bool)
+          && (!('stockType' in d) || d.stockType in ['new', 'used', 'both'])
+          // Phone numbers are stored in international E.164 format (+ country code).
+          && (!('phone' in d) || d.phone == '' || d.phone.matches('^[+][1-9][0-9]{6,14}$'))
+          && (!('whatsapp' in d) || d.whatsapp == '' || d.whatsapp.matches('^[+][1-9][0-9]{6,14}$'))
+          // A shop (any country) needs a phone number, a country, an address and a town.
+          && (d.get('isShop', false) != true || (
+                isNonEmptyString(d.get('phone', ''), 30)
+                && d.get('country', '') is string && d.get('country', '').matches('^[A-Z]{2}$')
+                && isNonEmptyString(d.get('address', ''), 300)
+                && isNonEmptyString(d.get('town', ''), 80)));
       }
 
-      allow read: if true;
-      allow create, update: if isOwner(uid)
-        && request.resource.data.keys().hasOnly(['uid', 'displayName', 'sellerType', 'location', 'bio', 'createdAt', 'updatedAt'])
+      allow get: if isOwner(uid) || resource == null || resource.data.get('suspended', false) != true || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(ownerKeys())
         && validSeller(request.resource.data);
-      allow delete: if isOwner(uid) || isAdmin();
+      allow update: if (isOwner(uid)
+          && resource.data.get('suspended', false) != true
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(ownerKeys())
+          && validSeller(request.resource.data))
+        || (isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(adminKeys())
+          && request.resource.data.get('suspended', false) is bool
+          && request.resource.data.get('featured', false) is bool
+          && request.resource.data.get('plan', 'trial') in ['trial', 'active', 'expired']
+          && isTrimmedString(request.resource.data.get('planNote', ''), 300)
+          && isTrimmedString(request.resource.data.get('suspendedReason', ''), 1000));
+      allow delete: if (isOwner(uid) && resource.data.get('suspended', false) != true) || isAdmin();
     }
 
     // --- 5b. Company verification application -------------------------
     match /sellerVerifications/{uid} {
       function ownerFields() {
-        return ['uid', 'companyName', 'registrationNumber', 'vatNumber', 'country',
+        return ['uid', 'kind', 'companyName', 'registrationNumber', 'vatNumber', 'country',
                 'address', 'contactName', 'contactEmail', 'contactPhone',
                 'documents', 'status', 'createdAt', 'updatedAt', 'submittedAt',
                 'submissionCount'];
@@ -225,17 +287,22 @@ service cloud.firestore {
           && isTrimmedString(d.contactEmail, 160)
           && isTrimmedString(d.contactPhone, 40)
           && d.documents is map
-          && d.documents.size() <= 10;
+          && d.documents.size() <= 10
+          && (!('kind' in d) || d.kind in ['company', 'shop']);
       }
 
       // A submission must carry the core company details and the four
       // required documents (uploaded to Storage under sellerDocs/{uid}/...).
+      // Verified Shop (kind == 'shop'): CIPC number, phone, address and a shopfront photo.
+      // Company (default): the four company documents.
       function completeSubmission(d) {
         return d.companyName.size() > 1
           && d.registrationNumber.size() > 3
           && d.address.size() > 5
-          && d.contactEmail.size() > 3
-          && d.documents.keys().hasAll(['registrationCertificate', 'taxClearance', 'proofOfAddress', 'directorId']);
+          && (d.get('kind', 'company') == 'shop'
+            ? (d.contactPhone.size() > 5 && d.documents.keys().hasAll(['shopfront']))
+            : (d.contactEmail.size() > 3
+              && d.documents.keys().hasAll(['registrationCertificate', 'taxClearance', 'proofOfAddress', 'directorId'])));
       }
 
       function ownerStatusOk(d) {
@@ -283,19 +350,40 @@ service cloud.firestore {
       function listingFields() {
         return ['sellerUid', 'sellerName', 'sellerType', 'title', 'category', 'price',
                 'currency', 'condition', 'description', 'imageUrl', 'imagePath',
-                'inStock', 'status', 'createdAt', 'updatedAt'];
+                'inStock', 'status', 'createdAt', 'updatedAt',
+                'partNumbers', 'fits', 'keywords', 'town', 'province', 'country', 'shipsTo', 'lat', 'lng', 'businessId'];
       }
 
       function ownerEditableFields() {
         return ['sellerName', 'sellerType', 'title', 'category', 'price', 'condition',
-                'description', 'imageUrl', 'imagePath', 'inStock', 'status', 'updatedAt'];
+                'description', 'imageUrl', 'imagePath', 'inStock', 'status', 'updatedAt', 'currency',
+                'partNumbers', 'fits', 'keywords', 'town', 'province', 'country', 'shipsTo', 'lat', 'lng', 'businessId'];
+      }
+
+      // Location copied from the shop profile (no re-review needed).
+      function locationFields() {
+        return ['town', 'province', 'country', 'shipsTo', 'lat', 'lng', 'businessId', 'updatedAt'];
+      }
+
+      // Spare-parts fields: part numbers / aliases, models it fits, search keywords, location, shop.
+      function validPartFields(d) {
+        return (!('partNumbers' in d) || (d.partNumbers is list && d.partNumbers.size() <= 20))
+          && (!('fits' in d) || (d.fits is list && d.fits.size() <= 20))
+          && (!('keywords' in d) || (d.keywords is list && d.keywords.size() <= 80))
+          && optString(d, 'town', 80)
+          && optString(d, 'province', 80)
+          && (!('country' in d) || d.country == '' || (d.country is string && d.country.matches('^[A-Z]{2}$')))
+          && (!('shipsTo' in d) || (d.shipsTo is list && d.shipsTo.size() <= 60))
+          && optCoord(d, 'lat', 90)
+          && optCoord(d, 'lng', 180)
+          && (!('businessId' in d) || d.businessId == '' || d.businessId == d.sellerUid);
       }
 
       function validListing(d) {
         return isNonEmptyString(d.title, 140)
           && isNonEmptyString(d.category, 60)
           && (d.price is int || d.price is float) && d.price >= 0 && d.price <= 10000000
-          && d.currency == 'ZAR'
+          && d.currency is string && d.currency.matches('^[A-Z]{3}$')
           && isNonEmptyString(d.condition, 60)
           && isTrimmedString(d.description, 4000)
           && isTrimmedString(d.imageUrl, 2000)
@@ -303,13 +391,15 @@ service cloud.firestore {
           && d.inStock is bool
           && d.sellerType in ['individual', 'company']
           && isNonEmptyString(d.sellerName, 80)
+          && validPartFields(d)
           && (!isBusinessCategory(d.category) || isVerifiedSeller(request.auth.uid));
       }
 
       // Verified companies publish straight away; everyone else waits for
       // admin approval ('pending').
       function allowedOwnerStatus(d) {
-        return d.status == 'pending' || (d.status == 'active' && isVerifiedSeller(request.auth.uid));
+        return !isSuspendedSeller(request.auth.uid)
+          && (d.status == 'pending' || (d.status == 'active' && isVerifiedSeller(request.auth.uid)));
       }
 
       allow read: if resource.data.status == 'active'
@@ -328,6 +418,11 @@ service cloud.firestore {
           && resource.data.status != 'removed'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['inStock', 'updatedAt'])
           && request.resource.data.inStock is bool)
+        // Owner's shop moved: copy the new location onto the listing (no re-review).
+        || (isSignedIn() && resource.data.sellerUid == request.auth.uid
+          && resource.data.status != 'removed'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(locationFields())
+          && validPartFields(request.resource.data))
         // Owner edits content: goes back to review unless verified company.
         || (isSignedIn() && resource.data.sellerUid == request.auth.uid
           && resource.data.status != 'removed'

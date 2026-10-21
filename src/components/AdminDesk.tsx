@@ -22,7 +22,20 @@ import HubModeration from './hub/HubModeration';
 import { isFirebaseConfigured } from '../lib/firebase';
 import {
   STATUS_LABELS,
-  VERIFICATION_DOC_TYPES,
+  docTypesFor,
+  adminCloseReports,
+  adminRevokeShopBadge,
+  adminSetShopSuspended,
+  adminSetShopPlan,
+  shopPlan,
+  PLAN_LABELS,
+  BUSINESS_PLAN_PRICE,
+  type ShopPlan,
+  subscribeSellerReports,
+  subscribeShops,
+  useVerifiedSellers,
+  type SellerProfile,
+  type SellerReport,
   adminDeleteListing,
   adminLogDocumentOpened,
   adminModerateListing,
@@ -46,7 +59,7 @@ import UserManagement from './UserManagement';
 import SearchAnalytics from './SearchAnalytics';
 import VideoModeration from './catalog/VideoModeration';
 
-type AdminTab = 'verifications' | 'listings' | 'videos' | 'hub' | 'audit' | 'users' | 'search';
+type AdminTab = 'verifications' | 'shops' | 'listings' | 'videos' | 'hub' | 'audit' | 'users' | 'search';
 
 const cardCls = 'bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800 shadow-sm shadow-slate-200/50 dark:shadow-none';
 const inputCls =
@@ -100,6 +113,7 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
 
   const tabs: { id: AdminTab; label: string }[] = [
     { id: 'verifications', label: 'Verifications' },
+    { id: 'shops', label: 'Shops' },
     { id: 'listings', label: 'Listings' },
     { id: 'videos', label: 'Videos' },
     { id: 'hub', label: 'Repair hub' },
@@ -110,6 +124,7 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
 
   const titles: Record<AdminTab, [string, string]> = {
     verifications: ['Seller verification queue', 'Open each company document, tick the checklist, then approve, reject with a reason, or revoke a badge. Every action is written to the audit log.'],
+    shops: ['Shops & suppliers', 'Every registered shop with its Business plan status (USD $20/month, set by hand; no payments in the app) and open reports. Suspend a shop (hides it and takes its listings down), restore it, or revoke its Verified badge. Every action is written to the audit log.'],
     listings: ['Listing moderation', 'Listings from individuals and unverified companies wait here until approved. Remove anything that breaks the rules.'],
     videos: ['Community video moderation', 'Reported videos appear first. Remove (hide) a video, restore it, or delete it permanently. Every action is written to the audit log.'],
     hub: ['Repair hub moderation', 'Approve or remove community device pages, AI-researched component pages, guides and Answers, and work through device requests. Every action is written to the audit log.'],
@@ -158,10 +173,12 @@ export default function AdminDesk({ themeConfig }: { themeConfig?: ThemeConfig }
         </div>
       )}
 
-      {!isFirebaseConfigured && (tab === 'verifications' || tab === 'listings' || tab === 'videos' || tab === 'hub' || tab === 'audit') ? (
+      {!isFirebaseConfigured && (tab === 'verifications' || tab === 'shops' || tab === 'listings' || tab === 'videos' || tab === 'hub' || tab === 'audit') ? (
         <Empty icon={AlertTriangle} title="Cloud database not configured" body="Add the VITE_FIREBASE_* settings to this build to review verifications, moderate listings and read the audit log." />
       ) : tab === 'verifications' ? (
         <VerificationQueue actor={actor} />
+      ) : tab === 'shops' ? (
+        <ShopsModeration actor={actor} />
       ) : tab === 'listings' ? (
         <ListingModeration actor={actor} />
       ) : tab === 'videos' ? (
@@ -255,12 +272,15 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
     setChecklist(app.checklist || {});
   }, [app.reviewedAt?.toMillis?.()]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const docs = VERIFICATION_DOC_TYPES.filter(d => app.documents?.[d.key]);
-  const requiredDocs = VERIFICATION_DOC_TYPES.filter(d => d.required);
+  const isShopApp = app.kind === 'shop';
+  const docTypes = docTypesFor(app);
+  const docs = docTypes.filter(d => app.documents?.[d.key]);
+  const requiredDocs = docTypes.filter(d => d.required);
+  const phoneChecked = !!checklist.phone?.valid;
   const requiredChecked = requiredDocs.every(d => {
     const c = checklist[d.key];
     return app.documents?.[d.key] && c?.legible && c?.valid && c?.matchesCompany;
-  });
+  }) && (!isShopApp || phoneChecked);
 
   const toggle = (key: string, field: keyof ChecklistEntry) =>
     setChecklist(c => ({ ...c, [key]: { ...EMPTY_CHECK, ...c[key], [field]: !(c[key]?.[field] ?? false) } }));
@@ -310,13 +330,16 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
     <div className={`${cardCls} overflow-hidden`}>
       <button onClick={onToggle} className="w-full text-left bg-slate-50/80 dark:bg-slate-800/40 px-5 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800">
         <div className="min-w-0">
-          <h4 className="text-base font-bold text-slate-900 dark:text-slate-100 truncate">{app.companyName || 'Unnamed company'}</h4>
+          <h4 className="text-base font-bold text-slate-900 dark:text-slate-100 truncate">
+            {isShopApp && <span className="mr-2 align-middle px-2 py-0.5 rounded-full bg-cobalt-100 dark:bg-cobalt-500/20 text-cobalt-700 dark:text-cobalt-200 text-[10px] font-bold">Shop</span>}
+            {app.companyName || 'Unnamed company'}
+          </h4>
           <p className="text-[11px] text-slate-500 font-mono">
             {app.registrationNumber || 'no reg. no.'} · submitted {formatTs(app.submittedAt)} · #{app.submissionCount || 0}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-slate-500">{docs.length}/{VERIFICATION_DOC_TYPES.length} docs</span>
+          <span className="text-[11px] text-slate-500">{docs.length}/{docTypes.length} docs</span>
           <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${STATUS_STYLE[app.status]}`}>{STATUS_LABELS[app.status]}</span>
         </div>
       </button>
@@ -325,7 +348,7 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
         <div className="p-5 sm:p-6 space-y-5">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
             {[
-              ['CIPC registration', app.registrationNumber],
+              ['Business registration no.', app.registrationNumber],
               ['VAT number', app.vatNumber || 'Not supplied'],
               ['Country', app.country],
               ['Address', app.address],
@@ -359,7 +382,7 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
                   </tr>
                 </thead>
                 <tbody>
-                  {VERIFICATION_DOC_TYPES.map(d => {
+                  {docTypes.map(d => {
                     const stored = app.documents?.[d.key];
                     const c = checklist[d.key] || EMPTY_CHECK;
                     return (
@@ -396,7 +419,16 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
                 </tbody>
               </table>
             </div>
-            {reviewable && !requiredChecked && <p className="text-[11px] text-slate-500">Tick all three checks on every required document to enable Approve.</p>}
+            {isShopApp && (
+              <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50 text-xs space-y-1.5">
+                <p className="text-slate-600 dark:text-slate-300">Verified Shop check: 1) search the registration number on the official company register for <span className="font-bold">{app.country || 'its country'}</span> (e.g. <a href="https://bizportal.gov.za" target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 dark:text-indigo-300 underline">CIPC / BizPortal</a> South Africa, <a href="https://find-and-update.company-information.service.gov.uk" target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 dark:text-indigo-300 underline">Companies House</a> UK, <a href="https://search.cac.gov.ng" target="_blank" rel="noopener noreferrer" className="font-bold text-indigo-600 dark:text-indigo-300 underline">CAC</a> Nigeria, the state business registry in the US) and confirm the name matches; 2) open the shopfront photo; 3) phone <span className="font-bold font-mono">{app.contactPhone || '—'}</span> and confirm it answers as this shop.</p>
+                <label className="flex items-center gap-2 font-bold text-slate-700 dark:text-slate-200">
+                  <input type="checkbox" disabled={!reviewable} checked={phoneChecked} onChange={() => setChecklist(c => ({ ...c, phone: phoneChecked ? EMPTY_CHECK : { legible: true, valid: true, matchesCompany: true } }))} className="w-4 h-4 rounded accent-emerald-500" />
+                  I phoned the shop and it answered as {app.companyName || 'this shop'}
+                </label>
+              </div>
+            )}
+            {reviewable && !requiredChecked && <p className="text-[11px] text-slate-500">Tick all three checks on every required document{isShopApp ? ' and the phone check' : ''} to enable Approve.</p>}
           </div>
 
           {mode && (
@@ -408,7 +440,7 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
                 rows={3}
                 value={reason}
                 onChange={e => setReason(e.target.value)}
-                placeholder={mode === 'reject' ? 'e.g. Proof of address is older than 3 months. Please upload a recent municipal bill or bank letter.' : 'e.g. CIPC shows the company as deregistered.'}
+                placeholder={mode === 'reject' ? 'e.g. Proof of address is older than 3 months. Please upload a recent municipal bill or bank letter.' : 'e.g. The company register shows the company as deregistered.'}
                 className={inputCls}
                 maxLength={1000}
               />
@@ -454,6 +486,116 @@ function VerificationCard({ app, actor, expanded, onToggle }: { app: SellerVerif
           {app.reviewerEmail && <p className="text-[10px] text-slate-400">Last reviewed by {app.reviewerEmail} · {formatTs(app.reviewedAt)}</p>}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shops (spare-parts businesses): reports, suspend / restore, revoke badge
+// ---------------------------------------------------------------------------
+
+function ShopsModeration({ actor }: { actor: Actor | null }) {
+  const [shops, setShops] = useState<SellerProfile[] | null>(null);
+  const [reports, setReports] = useState<SellerReport[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'reported' | 'all' | 'suspended'>('all');
+  const verified = useVerifiedSellers();
+  useEffect(() => subscribeShops(s => { setShops(s); setErr(null); }, e => { setShops([]); setErr(friendlyError(e)); }), []);
+  useEffect(() => subscribeSellerReports(setReports, () => setReports([])), []);
+  const openByShop = useMemo(() => {
+    const m = new Map<string, SellerReport[]>();
+    reports.filter(r => r.status === 'open').forEach(r => m.set(r.targetId, [...(m.get(r.targetId) || []), r]));
+    return m;
+  }, [reports]);
+  if (shops === null) return <div className="py-12 text-center text-slate-400 text-sm"><Loader2 className="w-4 h-4 animate-spin inline" /> Loading shops…</div>;
+  const visible = shops.filter(s => filter === 'all' || (filter === 'suspended' ? s.suspended : openByShop.has(s.uid)));
+  return (
+    <div className="space-y-4">
+      <ErrorNote msg={err} />
+      <div className="flex flex-wrap gap-1.5">
+        {([['all', `All (${shops.length})`], ['reported', `Reported (${shops.filter(s => openByShop.has(s.uid)).length})`], ['suspended', `Suspended (${shops.filter(s => s.suspended).length})`]] as const).map(([id, label]) => (
+          <button key={id} onClick={() => setFilter(id)} className={`px-3 py-1.5 rounded-xl text-xs font-bold ${filter === id ? 'bg-gradient-to-r from-indigo-600 to-violet-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>{label}</button>
+        ))}
+      </div>
+      {visible.length === 0 ? (
+        <Empty icon={CheckCircle2} title="Nothing here" body={filter === 'reported' ? 'No shop has an open report.' : 'No shops match this filter.'} />
+      ) : (
+        <div className="space-y-3">
+          {visible.map(s => <ShopRow key={s.uid} shop={s} reports={openByShop.get(s.uid) || []} verified={verified.has(s.uid)} actor={actor} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShopRow({ shop, reports, verified, actor }: { shop: SellerProfile; reports: SellerReport[]; verified: boolean; actor: Actor | null }) {
+  const [mode, setMode] = useState<null | 'suspend' | 'revoke'>(null);
+  const [reason, setReason] = useState('');
+  const [planNote, setPlanNote] = useState(shop.planNote || '');
+  const plan = shopPlan(shop);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const run = async (fn: () => Promise<void>) => {
+    if (!actor) { setErr('Sign in again to act on this shop.'); return; }
+    setBusy(true); setErr(null);
+    try { await fn(); setMode(null); setReason(''); } catch (ex) { setErr(friendlyError(ex)); } finally { setBusy(false); }
+  };
+  return (
+    <div className={`${cardCls} p-4 sm:p-5 space-y-3`}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0">
+          {shop.shopfrontUrl ? <img src={shop.shopfrontUrl} alt="" className="w-16 h-12 rounded-lg object-cover shrink-0" referrerPolicy="no-referrer" /> : <div className="w-16 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 shrink-0" />}
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2 flex-wrap">
+              {shop.displayName}
+              {verified && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 text-[10px] font-bold">Verified</span>}
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${plan === 'active' ? 'bg-emerald-100 text-emerald-800' : plan === 'expired' ? 'bg-red-100 text-red-800' : 'bg-indigo-100 text-indigo-800'}`}>{PLAN_LABELS[plan]}</span>
+              {shop.suspended && <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-300 text-[10px] font-bold">Suspended</span>}
+              {reports.length > 0 && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 text-[10px] font-bold">{reports.length} open report{reports.length === 1 ? '' : 's'}</span>}
+            </p>
+            <p className="text-[11px] text-slate-500">{[shop.address, shop.town, shop.province, shop.country].filter(Boolean).join(', ')}</p>
+            <p className="text-[11px] text-slate-500 font-mono">{[shop.phone, shop.whatsapp && `WA ${shop.whatsapp}`, shop.registrationNumber && `Reg ${shop.registrationNumber}`].filter(Boolean).join(' · ')}</p>
+            {shop.suspended && shop.suspendedReason && <p className="text-[11px] text-red-600">Reason: {shop.suspendedReason}</p>}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {shop.suspended ? (
+            <button disabled={busy} onClick={() => run(() => adminSetShopSuspended(shop, false, actor!))} className={ghostBtn}><CheckCircle2 className="w-4 h-4" /> Restore shop</button>
+          ) : (
+            <button disabled={busy} onClick={() => setMode('suspend')} className={`${ghostBtn} !text-red-600`}><Ban className="w-4 h-4" /> Suspend</button>
+          )}
+          {verified && <button disabled={busy} onClick={() => setMode('revoke')} className={`${ghostBtn} !text-red-600`}><ShieldOff className="w-4 h-4" /> Revoke badge</button>}
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
+        <span className="font-bold text-slate-700 dark:text-slate-200">Business plan ({BUSINESS_PLAN_PRICE}):</span>
+        {(['trial', 'active', 'expired'] as ShopPlan[]).map(p => (
+          <button key={p} disabled={busy || p === plan} onClick={() => run(() => adminSetShopPlan(shop, p, actor!, planNote))}
+            className={`px-2.5 py-1 rounded-lg font-bold ${p === plan ? (p === 'active' ? 'bg-emerald-600 text-white' : p === 'expired' ? 'bg-red-500 text-white' : 'bg-indigo-600 text-white') : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'}`}>
+            {PLAN_LABELS[p]}
+          </button>
+        ))}
+        <input value={planNote} onChange={e => setPlanNote(e.target.value)} placeholder="Note for the shop (optional), e.g. Paid until 30 Nov" className="flex-1 min-w-[12rem] px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700" maxLength={300} />
+        <span className="w-full text-[10px] text-slate-400">No payment is taken in the app. Set "Business plan active" after the shop has paid you, "Plan expired" when it lapses (the shop then drops out of "Where to buy"). Individual sellers never need a plan.</span>
+      </div>
+      {reports.length > 0 && (
+        <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/20 text-xs space-y-1">
+          {reports.slice(0, 6).map(r => <p key={r.id} className="break-words"><span className="font-bold">{r.reason}</span>{r.details ? `: ${r.details}` : ''} <span className="text-slate-400">({formatTs(r.createdAt)})</span></p>)}
+          <button disabled={busy} onClick={() => run(() => adminCloseReports(reports.map(r => r.id), actor!, shop.displayName, shop.uid))} className="text-[11px] font-bold text-indigo-600 dark:text-indigo-300">Mark reports as reviewed</button>
+        </div>
+      )}
+      {mode && (
+        <div className="space-y-2">
+          <textarea rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder={mode === 'suspend' ? 'Reason (shown to the shop owner), e.g. Several buyers reported fake listings.' : 'Reason (shown to the shop owner), e.g. The company register shows the company as deregistered.'} className={inputCls} maxLength={1000} />
+          <div className="flex gap-2">
+            <button disabled={busy || !reason.trim()} onClick={() => run(() => (mode === 'suspend' ? adminSetShopSuspended(shop, true, actor!, reason) : adminRevokeShopBadge(shop.uid, actor!, reason)))} className="px-4 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white font-bold text-xs inline-flex items-center gap-1.5 disabled:opacity-50">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />} Confirm {mode === 'suspend' ? 'suspension' : 'revocation'}
+            </button>
+            <button disabled={busy} onClick={() => { setMode(null); setReason(''); }} className={ghostBtn}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <ErrorNote msg={err} />
     </div>
   );
 }
@@ -542,7 +684,7 @@ function ModerationRow({ listing, actor }: { listing: ListingDoc; actor: Actor |
       <div className="flex-1 min-w-0 space-y-1">
         <div className="flex items-start justify-between gap-2">
           <p className="text-sm font-bold text-slate-900 dark:text-slate-100 line-clamp-1">{listing.title}</p>
-          <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-200 shrink-0">{formatZar(listing.price)}</span>
+          <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-200 shrink-0">{formatZar(listing.price, listing.currency)}</span>
         </div>
         <p className="text-[11px] text-slate-500">
           {listing.sellerName} ({listing.sellerType}) · {listing.category} · {listing.condition} · {formatTs(listing.createdAt)}

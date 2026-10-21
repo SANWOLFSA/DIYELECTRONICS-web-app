@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Moon, Sun, User, CheckCircle2, Heart, Palette, HardDrive, LogOut, Scale, ChevronRight } from 'lucide-react';
+import { Moon, Sun, User, CheckCircle2, Heart, Palette, HardDrive, LogOut, Scale, ChevronRight, Store } from 'lucide-react';
 import { navigate } from '../hooks/usePathname';
 
 interface SettingsViewProps {
@@ -174,6 +174,28 @@ export default function SettingsView({
               <LogOut className="w-4 h-4" /> Sign out
             </button>
           )}
+        </Section>
+        <Section icon={<Store className="w-[18px] h-[18px]" />} title="Spare parts & shops" subtitle="Find parts and tools near you, or list your own shop.">
+          <div className="divide-y divide-slate-100 dark:divide-slate-800">
+            {[
+              { label: 'Find parts & tools near you', hint: 'Marketplace, nearest shops first', path: '/marketplace?near=1' },
+              { label: 'List your shop', hint: 'Shops & suppliers worldwide; individuals list free', path: '/marketplace?shop=1' },
+              { label: 'How it works', hint: 'Step-by-step help', path: '/help' },
+            ].map((item) => (
+              <a
+                key={item.label}
+                href={item.path}
+                onClick={(e) => { e.preventDefault(); navigate(item.path); }}
+                className="flex items-center justify-between gap-3 py-3 group"
+              >
+                <span>
+                  <span className="block text-sm font-medium text-slate-900 dark:text-white group-hover:text-cobalt-600">{item.label}</span>
+                  <span className="block text-[13px] text-slate-500 dark:text-slate-400">{item.hint}</span>
+                </span>
+                <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
+              </a>
+            ))}
+          </div>
         </Section>
         <Section icon={<Scale className="w-[18px] h-[18px]" />} title="Legal" subtitle="The rules for using DIY Electronics.">
           <div className="divide-y divide-slate-100 dark:divide-slate-800">

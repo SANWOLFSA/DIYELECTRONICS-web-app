@@ -346,6 +346,20 @@ const CHAT_METHOD = `How you work:
 - After the "Still not fixed?" section you may add one suggested next action on its own line starting with "Next:", e.g. "Next: Map this board (tap + then Map circuit)", "Next: Upload a clear photo of the power supply board", or "Next: measure the 12 V rail and tell me the reading".
 - Format in clean Markdown: short headings, bullets, and Markdown tables for measurements / colour codes when helpful. Keep it scannable on a phone.`;
 
+/** Multimeter Lab pages the AI may link to (ids from src/data/meter). */
+const METER_LAB_LINKS = '/multimeter (how a multimeter works, every dial position), /multimeter/test/resistor, /multimeter/test/capacitor-electrolytic (incl. ESR), /multimeter/test/capacitor-ceramic, /multimeter/test/diode, /multimeter/test/zener, /multimeter/test/led, /multimeter/test/bridge-rectifier, /multimeter/test/bjt-npn, /multimeter/test/mosfet-n, /multimeter/test/igbt, /multimeter/test/triac, /multimeter/test/regulator-78xx, /multimeter/test/regulator-ldo, /multimeter/test/fuse, /multimeter/test/thermal-fuse, /multimeter/test/thermistor-ntc, /multimeter/test/mov, /multimeter/test/inductor, /multimeter/test/transformer, /multimeter/test/relay, /multimeter/test/switch, /multimeter/test/motor, /multimeter/test/speaker, /multimeter/test/optocoupler, /multimeter/test/battery, /multimeter/test/ic-power-rails, /multimeter/test/heating-element, /multimeter/test/magnetron, /multimeter/test/compressor';
+
+/**
+ * Multimeter-aware diagnosis (user requirement, Oct 2026): precise answers need a meter, but many
+ * users do not own one. Shared by every repair persona through prepareChat().
+ */
+const MULTIMETER_FLOW = `Multimeter (measurements make the diagnosis precise):
+- Early in a diagnosis (your first or second answer about a fault), if the user has not said whether they own a multimeter, make your ONE question at the end: "Do you have a multimeter?" Do not ask again once they have answered; remember the answer for the rest of the conversation.
+- Until you know, or if they say NO: put the no-tool checks first in Solution A: look for burnt, cracked or bulging parts (domed or leaking capacitor tops, black marks, melted plastic), smell for burning, listen for clicking, buzzing or a ticking power supply, check whether the power / standby LED lights or blinks (and how many times), and ask for a clear photo of the board (tap + then Take photo). Mark the exact step that needs a meter, e.g. "(needs a multimeter)", and say what the meter would tell them. Tell them a basic digital multimeter with a continuity beep is enough and that the app shows shops nearby that sell one.
+- If they say YES: guide every measurement step by step: 1) where to turn the dial (e.g. "V with a straight line (DC volts), 20 V range" or "the diode / beep symbol"), 2) which sockets the leads go in (black in COM, red in VΩ), 3) exactly where the black probe goes and where the red probe goes (e.g. "black on the metal screw shield (ground), red on the pin of CN801 marked 12V"), 4) whether the device is unplugged (resistance, diode, continuity: always unplugged and capacitors discharged) or powered (voltage), 5) the expected reading with units, and 6) what a good vs bad reading means. Then ask them to type the reading back ("Tell me the number on the screen") so you can narrow the fault down; use their readings in your next answer.
+- When a step tests a component, add a link to the matching Multimeter Lab guide as a Markdown link, e.g. [How to test an electrolytic capacitor](/multimeter/test/capacitor-electrolytic). Available pages: ${METER_LAB_LINKS}.
+- Name replacement parts with their exact printed part number or value when known (e.g. "6870C-0442B T-con", "470uF 25V 105C capacitor") so the app can show shops that stock it under your answer.`;
+
 /**
  * Every fix or solution the app gives uses this step-by-step escalation format (user requirement,
  * Oct 2026). Shared by /api/chat, /api/chat-stream (Express) and netlify/functions/chat-stream.mts,
@@ -422,7 +436,7 @@ export async function prepareChat(body: any): Promise<ChatPrep> {
   const instruction = isTutor
     ? `${persona}${context ? `\n\nStudy context (from the app):\n${context}` : ''}\n\n${CHAT_SAFETY_RULES}`
     : isHelp ? persona
-    : `${persona}\n\n${CHAT_METHOD}\n\n${SOLUTION_FORMAT}\n\n${CHAT_SAFETY_RULES}`;
+    : `${persona}\n\n${CHAT_METHOD}\n\n${SOLUTION_FORMAT}\n\n${mode === 'codefox' || mode === 'circuitbear' ? '' : `${MULTIMETER_FLOW}\n\n`}${CHAT_SAFETY_RULES}`;
 
   let historyChars = current.images.reduce((n, i) => n + i.data.length, 0);
   const maxTurns = isTutor ? 8 : MAX_CHAT_HISTORY_TURNS; // the tutor keeps a short context for speed
@@ -3286,9 +3300,10 @@ Return ONLY a JSON object, no prose, in exactly this shape:
  "components": [{"id": string, "ref": string, "label": string, "type": string, "blockId": blockId, "box_2d": [number,number,number,number]|null, "check": boolean, "priority": 1|2|3, "reason": string, "measure": string, "expected": string, "howToTest": string}],
  "testPoints": [{"label": string, "blockId": blockId, "expected": string, "how": string}],
  "failurePoints": [{"component": string, "symptom": string, "blockId": blockId}],
+ "noToolChecks": string[],              // 3-6 checks WITHOUT a multimeter, most useful first: look for burnt / bulging / leaking parts (say where), smell, sound (clicking, ticking, buzzing), power / standby LED behaviour, and "send a clear photo of ..."
  "safety": string
 }
-Rules: 5-14 blocks, 4-16 components, 2-8 of them with "check": true (the suspects / parts to test first; priority 1 = test first). Every connection and component must reference a real block id. "measure" says what to measure and with which meter mode (e.g. "ESR / capacitance out of circuit, or DC volts across it powered"), "expected" gives typical values with units. Typical voltages are fine; never invent exact part numbers you cannot read or do not know (use a generic label like "Main filter capacitor" instead). Keep every string short (under 160 characters).${opts.evidence ? `\n\nWeb results found online for this board (use as evidence for board numbers, ICs and known faults):\n${opts.evidence}` : ''}`;
+Rules: 5-14 blocks, 4-16 components, 2-8 of them with "check": true (the suspects / parts to test first; priority 1 = test first). Every connection and component must reference a real block id. "measure" says what to measure and with which meter mode (e.g. "ESR / capacitance out of circuit, or DC volts across it powered"), "expected" gives typical values with units. For suspects, "howToTest" is a beginner's step-by-step meter guide: the dial position, black probe where / red probe where, unplugged or powered, the expected reading and what a bad reading means (e.g. "Unplug and discharge. Dial to the diode/beep symbol. Black on the stripe end, red on the other end: 0.4-0.7 V is good; 0 or beeping = shorted; OL both ways = open."). "noToolChecks" are for users without a multimeter. Typical voltages are fine; never invent exact part numbers you cannot read or do not know (use a generic label like "Main filter capacitor" instead). Keep every string short (under 160 characters).${opts.evidence ? `\n\nWeb results found online for this board (use as evidence for board numbers, ICs and known faults):\n${opts.evidence}` : ''}`;
 
 const clampBox = (b: any): [number, number, number, number] | null => {
   if (!Array.isArray(b) || b.length !== 4) return null;
@@ -3327,6 +3342,7 @@ function sanitizeCircuitMap(raw: any, hasPhoto: boolean) {
     summary: s(raw?.summary, 500), blocks, connections, powerFlow, components,
     testPoints: (Array.isArray(raw?.testPoints) ? raw.testPoints : []).slice(0, 12).map((t: any) => ({ label: s(t?.label, 80), blockId: ids.has(t?.blockId) ? t.blockId : null, expected: s(t?.expected, 120), how: s(t?.how, 200) })).filter((t: any) => t.label),
     failurePoints: (Array.isArray(raw?.failurePoints) ? raw.failurePoints : []).slice(0, 10).map((f: any) => ({ component: s(f?.component, 80), symptom: s(f?.symptom, 160), blockId: ids.has(f?.blockId) ? f.blockId : null })).filter((f: any) => f.component),
+    noToolChecks: strArr(raw?.noToolChecks, 6, 200),
     safety: s(raw?.safety, 400) || 'Unplug the device and discharge the large primary capacitor before touching the power section. Mains-side parts can hold lethal voltage.',
   };
 }
