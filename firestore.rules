@@ -80,6 +80,11 @@ service cloud.firestore {
         return !('role' in d) || !(d.role is string) || d.role.lower() != 'admin';
       }
 
+      // Ownership Agreement (FRP & unlock guides): the owner records acceptance as the server time.
+      function ownershipAgreementOk(d) {
+        return !('ownershipAgreementAt' in d) || d.ownershipAgreementAt is timestamp;
+      }
+
       allow read: if isOwner(userId) || isAdmin();
 
       // On sign-up a user may pick a normal role (e.g. "Technician"), but not
@@ -88,11 +93,14 @@ service cloud.firestore {
         && roleIsNotAdmin(request.resource.data)
         && request.resource.data.get('isAdmin', false) == false
         && request.resource.data.get('isVerifiedTrader', false) == false
-        && request.resource.data.get('isVerifiedCompany', false) == false;
+        && request.resource.data.get('isVerifiedCompany', false) == false
+        && ownershipAgreementOk(request.resource.data);
 
       // Owners can edit their profile but not role / admin / verification flags.
+      // They may set users/{uid}.ownershipAgreementAt (a timestamp) when they accept the Ownership Agreement.
       allow update: if (isOwner(userId)
-          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(privilegedUserFields()))
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(privilegedUserFields())
+          && ownershipAgreementOk(request.resource.data))
         || isAdmin();
 
       allow delete: if isAdmin();

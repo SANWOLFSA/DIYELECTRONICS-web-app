@@ -15,6 +15,8 @@ import {
   reportVideo, subscribeModelVideos, subscribeMyVideos, toggleHelpful, updateVideoDetails, useHelpfulMark, validateVideoFile, videoMillis,
   type CommunityVideo, type OwnerInfo, type UploadHandle, type VideoTarget,
 } from '../../lib/communityVideos';
+import { OwnershipGuard, useOwnershipGate } from '../OwnershipAgreementModal';
+import { isOwnershipSensitive } from '../../lib/ownershipAgreement';
 
 // Circuit Mint styling: indigo/violet primary, mint (emerald) accents.
 const card = 'bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm';
@@ -210,7 +212,7 @@ function VideoCard({ video: v, uid, canModerate, actor, solutionTitle, solutionH
 
   return (
     <article className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/40 p-3 flex flex-col gap-3">
-      <VideoPlayer video={v} />
+      <OwnershipGuard compact texts={[v.title, v.description, v.solutionTitle]}><VideoPlayer video={v} /></OwnershipGuard>
       <div className="space-y-1.5 min-w-0">
         <div className="flex items-start justify-between gap-2">
           <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 leading-snug break-words">{v.title}</h3>
@@ -398,6 +400,7 @@ function ShareVideoModal({ target, solutions, fixedSolution, owner, onClose }: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const { gate, modal: ownershipModal } = useOwnershipGate();
   const handle = useRef<UploadHandle | null>(null);
 
   const parsed = link.trim() ? parseVideoLink(link) : null;
@@ -411,6 +414,11 @@ function ShareVideoModal({ target, solutions, fixedSolution, owner, onClose }: {
   };
 
   const submit = async () => {
+    // FRP / unlock / account-removal content: the uploader confirms the Ownership Agreement first.
+    if (isOwnershipSensitive(title, description, solTitle) && !(await gate('upload'))) {
+      setErr('Upload cancelled: FRP and unlock videos can only be shared after accepting the Ownership Agreement.');
+      return;
+    }
     setErr(null); setBusy(true);
     const fields = { title, description, solutionId: solutionId || undefined, solutionTitle: solTitle };
     try {
@@ -435,6 +443,7 @@ function ShareVideoModal({ target, solutions, fixedSolution, owner, onClose }: {
   return (
     <Modal title="Share a repair video" onClose={close} wide>
       <p className="text-xs text-slate-500 -mt-2">For the <span className="font-bold text-slate-700 dark:text-slate-300">{target.deviceLabel}</span>. It will appear under this model’s solutions.</p>
+      {ownershipModal}
 
       <div className="grid grid-cols-2 bg-slate-100 dark:bg-slate-800/80 rounded-xl p-1 gap-1" role="tablist">
         {([['upload', 'Upload a file', Upload], ['link', 'YouTube / Vimeo link', Link2]] as const).map(([id, label, Icon]) => (

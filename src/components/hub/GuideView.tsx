@@ -12,6 +12,7 @@ import {
   type HubGuide, type GuideComment,
 } from '../../lib/repairHub';
 import { PageShell, card, input, btnPrimary, btnMint, btnGhost, btnDanger, Chip, DIFF_STYLE, ErrorNote, Notice, Loading, SignInPrompt, ExtLink, useHubUser } from './ui';
+import { OwnershipGuard } from '../OwnershipAgreementModal';
 
 function CommentThread({ guide, stepIndex, comments, onOpenAuth }: { guide: HubGuide; stepIndex: number; comments: GuideComment[]; onOpenAuth?: () => void }) {
   const { uid, owner } = useHubUser();
@@ -131,6 +132,8 @@ export default function GuideView({ onOpenAuth }: { onOpenAuth?: () => void }) {
         {guide.coverUrl ? <img src={guide.coverUrl} alt="" className="w-full aspect-[4/3] object-cover rounded-xl bg-slate-100" /> : null}
       </div>
 
+      {/* FRP / unlock / account-removal guides stay hidden until the Ownership Agreement is accepted. */}
+      <OwnershipGuard texts={[guide.title, guide.summary]}>
       {guide.videoUrl ? (
         <section className={`${card} p-5 space-y-3`}>
           <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">{guide.kind === 'teardown' ? 'Teardown video' : 'Video'}</h2>
@@ -195,6 +198,7 @@ export default function GuideView({ onOpenAuth }: { onOpenAuth?: () => void }) {
           </li>
         ))}
       </ol>
+      </OwnershipGuard>
 
       <section className={`${card} p-5 space-y-3 text-center`}>
         <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">Finished?</h2>

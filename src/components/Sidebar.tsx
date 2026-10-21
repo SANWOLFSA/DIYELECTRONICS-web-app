@@ -45,7 +45,7 @@ export default function Sidebar({
       title: 'Repair',
       items: [
         { id: 'devices', label: 'Devices', icon: Smartphone },
-        { id: 'phones', label: 'Phone fixes', icon: Wrench },
+        { id: 'phones', label: 'Phone Tricks', icon: Wrench },
         { id: 'guides', label: 'Repair guides', icon: BookOpen },
         { id: 'teardowns', label: 'Teardowns', icon: ScanSearch },
         { id: 'answers', label: 'Answers', icon: HelpCircle },

@@ -5,7 +5,9 @@ import { doc, getDoc } from 'firebase/firestore';
 import { Smartphone, Zap, Search, AlertTriangle, Sparkles, CheckCircle2, ChevronDown, Wand2, FileText } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { Bot } from 'lucide-react';
-import { RouteLink } from '../hooks/usePathname';
+import { RouteLink, navigate } from '../hooks/usePathname';
+import { OwnershipAgreementModal } from './OwnershipAgreementModal';
+import { useOwnershipAccepted } from '../lib/ownershipAgreement';
 import { askAiPrompt, askAiUrl } from '../lib/escalation';
 import type { ThemeConfig } from '../lib/theme';
 
@@ -31,7 +33,20 @@ const COMMON_ISSUES = [
   "Stuck in Bootloop"
 ];
 
-export default function PhonesPage({ themeConfig, onNavigateTo3D }: { themeConfig?: ThemeConfig; onNavigateTo3D?: () => void }) {
+export default function PhonesPage(props: { themeConfig?: ThemeConfig; onNavigateTo3D?: () => void }) {
+  // Phone Tricks (incl. FRP / account-lock help) always opens with the Ownership Agreement.
+  const accepted = useOwnershipAccepted();
+  if (!accepted) {
+    return (
+      <div className="ds-page">
+        <OwnershipAgreementModal onAgree={() => undefined} onCancel={() => navigate('/')} />
+      </div>
+    );
+  }
+  return <PhoneTricks {...props} />;
+}
+
+function PhoneTricks({ themeConfig, onNavigateTo3D }: { themeConfig?: ThemeConfig; onNavigateTo3D?: () => void }) {
   const [selectedBrand, setSelectedBrand] = useState("");
   const [selectedIssue, setSelectedIssue] = useState("");
   const [customSymptom, setCustomSymptom] = useState("");
@@ -122,7 +137,7 @@ Use the Solution A -> If A didn't work: Solution B -> If B didn't work: Solution
               <span>{themeConfig?.bannerTag || 'Phone repair & diagnostics'}</span>
             </div>
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-white mb-2">
-              Phones Diagnostics & Solution Matrix
+              Phone Tricks: diagnostics &amp; fixes
             </h1>
             <p className="text-slate-300 dark:text-slate-400 text-sm max-w-2xl font-normal leading-relaxed">
               Pick your phone and the problem (or type the symptom or error code) to get step-by-step troubleshooting from curated answers or the AI repair assistant.

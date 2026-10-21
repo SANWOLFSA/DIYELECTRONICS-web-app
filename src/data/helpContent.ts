@@ -10,8 +10,17 @@ export const HELP_TOPICS: HelpTopic[] = [
     'When you name a board or model number, real board photos and listings found online (iFixit, Wikipedia, Wikimedia Commons) appear under the answer with their sources.',
     'Tap the expand icon (top right) for full screen. "New chat" starts over. AI answers can be wrong: always confirm with your meter and the service manual.',
   ] },
+  { id: 'ownership-agreement', title: 'Ownership Agreement (Phone Tricks, FRP & unlock guides)', steps: [
+    'Phone Tricks, and any video, guide or AI question about FRP, bypassing, unlocking, or Google / Samsung / iCloud account removal, first shows the Ownership Agreement. Tick the box and tap "Agree & Continue". You only do this once per device (it is also saved to your account when signed in).',
+    '1. You will only use these guides on a phone or device you own, or one you have the owner\'s written permission to repair.',
+    '2. You will never use them on a lost, stolen or found device. If you have a device that isn\'t yours, return it to the owner or the police.',
+    '3. Guides and videos are posted by community members and belong to them. DIY Electronics does not make, check or endorse them, and isn\'t responsible for how they\'re used.',
+    '4. Misusing these guides may be a crime in your country, and you alone are responsible for your actions.',
+    '5. We may remove content and suspend accounts that break these rules, and we co-operate with lawful requests from authorities.',
+    'DIY Electronics provides this help as-is and is not accountable for how you use it. When you upload an FRP or unlock video or guide, you confirm the agreement again and that you are sharing it only for device owners.',
+  ] },
   { id: 'fix-format', title: 'How fixes are laid out (Solution A, B, C)', steps: [
-    'Every fix in the app (device solutions, the AI diagnostic tool, phone fixes and AI chat answers) starts with Solution A: the easiest and most likely fix. Do its numbered steps in order.',
+    'Every fix in the app (device solutions, the AI diagnostic tool, Phone Tricks and AI chat answers) starts with Solution A: the easiest and most likely fix. Do its numbered steps in order.',
     'Each step has a bold action title and one or two plain sentences telling you exactly what to do, where to touch, what you should see, and why.',
     'If Solution A did not fix it, move down to "If A didn\'t work: Solution B", then "If B didn\'t work: Solution C".',
     'Still not fixed? Tap "Ask AI" under Solution C. The AI Assistant opens with your problem already typed in: add what happened at each step (or a photo) and press send. The AI will also tell you when a professional repair is the safer choice.',

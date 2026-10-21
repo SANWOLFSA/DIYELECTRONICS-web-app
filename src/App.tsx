@@ -25,6 +25,8 @@ import { usePathname, navigate } from './hooks/usePathname';
 import SessionTimeoutWatcher from './components/SessionTimeoutWatcher';
 import NotFound from './components/NotFound';
 import LoginWall, { signInWallWasOpen } from './components/LoginWall';
+import { OwnershipAgreementModal } from './components/OwnershipAgreementModal';
+import { isOwnershipSensitive, syncOwnershipFromProfile, useOwnershipAccepted } from './lib/ownershipAgreement';
 import { GUEST_TABS, gateEnabled, SIGNIN_REQUIRED_EVENT, LOGIN_SUCCESS_EVENT } from './lib/signInGate';
 const TheoryHub = lazy(() => import('./components/theory/TheoryHub'));
 const MultimeterPage = lazy(() => import('./components/meter/MultimeterPage'));
@@ -105,6 +107,7 @@ export default function App() {
   // Guest preview + login wall (see lib/signInGate.ts). A "guest" is anyone without a Firebase sign-in,
   // including people who pressed "Continue as guest".
   const signedIn = !gateEnabled || !!firebaseUser;
+  const ownershipAccepted = useOwnershipAccepted();
   const [wallReason, setWallReason] = useState<string | null>(null);
   const [wallOpen, setWallOpen] = useState<boolean>(() => gateEnabled && signInWallWasOpen());
   
@@ -163,6 +166,7 @@ export default function App() {
           const docSnap = await getDoc(docRef);
           if (docSnap.exists()) {
             const profile = docSnap.data() as UserProfile;
+            syncOwnershipFromProfile(docSnap.data());
             setCurrentUser(profile);
             setIsAuthenticated(true);
             storage.setIsAuthenticated(true);
@@ -558,7 +562,11 @@ export default function App() {
       </div>
 
       {/* Guide Detail Modal */}
-      {selectedGuide && (
+      {/* FRP / unlock guides open with the Ownership Agreement first (Cancel closes the guide). */}
+      {selectedGuide && !ownershipAccepted && isOwnershipSensitive(selectedGuide.title) && (
+        <OwnershipAgreementModal onAgree={() => undefined} onCancel={() => setSelectedGuide(null)} />
+      )}
+      {selectedGuide && (ownershipAccepted || !isOwnershipSensitive(selectedGuide.title)) && (
         <GuideDetail 
           guide={selectedGuide}
           onClose={() => setSelectedGuide(null)}

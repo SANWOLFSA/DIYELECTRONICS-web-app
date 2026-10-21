@@ -14,6 +14,8 @@ import {
 import { PageShell, card, input, btnPrimary, btnMint, btnGhost, btnDanger, ErrorNote, Notice, SignInPrompt, Loading, useHubUser } from './ui';
 import DevicePicker from './DevicePicker';
 import { uploadGuideImage, uploadGuideVideo, checkGuideImage, checkGuideVideo, friendlyUploadError } from '../../lib/guideMedia';
+import { useOwnershipGate } from '../OwnershipAgreementModal';
+import { isOwnershipSensitive } from '../../lib/ownershipAgreement';
 
 const emptyStep = (): GuideStep => ({ title: '', text: '', imageUrls: [''], caution: '' });
 
@@ -138,6 +140,8 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
 
   const stepNeedsPhoto = (st: GuideStep) => kind === 'teardown' && !!(st.text.trim() || st.title.trim()) && !st.imageUrls.some((u) => u && isHttpsUrl(u));
 
+  const { gate, modal: ownershipModal } = useOwnershipGate();
+
   const save = async (publish: boolean) => {
     if (!device) { setErr('Choose the device this guide is for.'); return; }
     if (uploading) { setErr('Please wait for the uploads to finish.'); return; }
@@ -145,6 +149,11 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
     const g: GuideInput = { title, summary, kind, device, difficulty, minutes, tools, parts, steps, coverUrl, videoUrl };
     const v = validateGuide(g, publish);
     if (v) { setErr(v); return; }
+    // FRP / unlock / account-removal guides: the author confirms the Ownership Agreement before sharing.
+    if (publish && isOwnershipSensitive(title, summary) && !(await gate('upload'))) {
+      setErr('Not published: FRP and unlock guides can only be shared after accepting the Ownership Agreement.');
+      return;
+    }
     setBusy(true); setErr('');
     try {
       if (editId) {
@@ -163,6 +172,7 @@ export default function GuideEditor({ onOpenAuth }: { onOpenAuth?: () => void })
 
   return (
     <PageShell>
+      {ownershipModal}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <RouteLink to="/guides" className="text-xs font-bold text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1"><ArrowLeft className="w-3.5 h-3.5" /> Guides</RouteLink>

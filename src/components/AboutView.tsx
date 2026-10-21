@@ -1,5 +1,7 @@
 import { Info, ShieldCheck, Cpu, Leaf, Users, Flag } from 'lucide-react';
 import { USER_CONTENT_DISCLAIMER, CONTENT_POLICY_POINTS } from '../config/policy';
+import { ShieldAlert } from 'lucide-react';
+import { OWNERSHIP_AGREEMENT_CLAUSES, OWNERSHIP_AGREEMENT_INTRO, OWNERSHIP_AGREEMENT_NOTICE, OWNERSHIP_AGREEMENT_TITLE } from '../lib/ownershipAgreement';
 
 export default function AboutView() {
   return (
@@ -48,6 +50,14 @@ export default function AboutView() {
           <h3 className="text-base font-bold text-stone-900 dark:text-stone-100">Content policy</h3>
           <ul className="text-xs text-stone-600 dark:text-stone-400 leading-relaxed list-disc pl-5 space-y-1">{CONTENT_POLICY_POINTS.map((p) => <li key={p}>{p}</li>)}</ul>
         </div>
+      </div>
+
+      <div id="ownership-agreement" className="bg-white dark:bg-stone-900 border border-amber-200 dark:border-amber-900 rounded-3xl p-6 shadow-sm space-y-3">
+        <div className="w-10 h-10 rounded-xl bg-amber-500/10 text-amber-600 flex items-center justify-center"><ShieldAlert className="w-5 h-5" /></div>
+        <h3 className="text-base font-bold text-stone-900 dark:text-stone-100">Terms: {OWNERSHIP_AGREEMENT_TITLE}</h3>
+        <p className="text-xs text-stone-600 dark:text-stone-400">Phone Tricks, FRP / unlock / account-removal guides and videos, and AI answers about them open only after you accept this agreement. {OWNERSHIP_AGREEMENT_INTRO}</p>
+        <ol className="text-xs text-stone-600 dark:text-stone-400 leading-relaxed list-decimal pl-5 space-y-1">{OWNERSHIP_AGREEMENT_CLAUSES.map((c) => <li key={c}>{c}</li>)}</ol>
+        <p className="text-xs font-semibold text-stone-700 dark:text-stone-300">{OWNERSHIP_AGREEMENT_NOTICE}</p>
       </div>
 
       <div className="bg-stone-900 text-stone-100 dark:bg-stone-900 dark:border dark:border-stone-800 rounded-3xl p-8 space-y-6">
