@@ -11,7 +11,8 @@ import {
   signOut,
   updateProfile
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { TERMS_VERSION } from '../config/terms';
 import { auth, db, isFirebaseConfigured } from './firebase';
 import { startSession } from './session';
 import type { UserProfile } from '../types';
@@ -58,6 +59,11 @@ export async function loadOrCreateProfile(
   try {
     const snap = await getDoc(ref);
     if (snap.exists()) {
+      // Signing in = accepting the current Terms of Use ("By continuing you agree…"): record the version.
+      if (snap.data()?.termsVersion !== TERMS_VERSION) {
+        setDoc(ref, { termsVersion: TERMS_VERSION, termsAcceptedAt: serverTimestamp() }, { merge: true })
+          .catch((err) => console.warn('[auth] Could not record terms acceptance.', err));
+      }
       return { ...fallback, ...(snap.data() as Partial<UserProfile>), id: fbUser.uid };
     }
   } catch (err) {
@@ -66,7 +72,8 @@ export async function loadOrCreateProfile(
   }
 
   try {
-    await setDoc(ref, fallback);
+    // New account: store which Terms of Use version was accepted at sign-up, and when.
+    await setDoc(ref, { ...fallback, termsVersion: TERMS_VERSION, termsAcceptedAt: serverTimestamp() });
   } catch (err) {
     console.warn('[auth] Could not save new user profile to Firestore.', err);
   }

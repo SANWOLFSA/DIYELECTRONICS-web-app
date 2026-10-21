@@ -343,6 +343,10 @@ export default function AuthPanel({
             </button>
           </div>
 
+          <p className="text-[11px] text-center text-slate-500 dark:text-slate-300">
+            {mode === 'signup' ? 'By creating an account' : 'By continuing'} you agree to the <a href="/terms" target="_blank" rel="noopener" className="underline font-semibold">Terms of Use</a> and confirm you are 13 or older (under 18 with a parent or guardian's consent).
+          </p>
+
           {showGuest && (
             <div className="pt-1 space-y-1.5">
               <button

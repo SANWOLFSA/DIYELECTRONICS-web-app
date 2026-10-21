@@ -5,6 +5,7 @@
  * instantly from a small localStorage cache.
  */
 import { aiFetch } from './aiFetch';
+import { authedFetch, SignInRequiredError } from './signInGate';
 
 export interface ChatRequestBody {
   message: string;
@@ -17,7 +18,7 @@ export interface ChatRequestBody {
 }
 export interface ChatResult { text: string; board?: any; ttftMs?: number; cached?: boolean; model?: string }
 
-const CACHE_KEY = 'diy_ai_answer_cache_v1';
+const CACHE_KEY = 'diy_ai_answer_cache_v2'; // v2: answers use the Solution A/B/C format
 const CACHE_MAX = 60;
 
 function hash(s: string): string {
@@ -60,9 +61,9 @@ export async function streamChat(body: ChatRequestBody, onText: (full: string) =
   const t0 = performance.now();
   let res: Response | null = null;
   try {
-    res = await fetch('/api/chat-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+    res = await authedFetch('/api/chat-stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal }, 'Sign in to chat with the AI assistant.');
   } catch (e: any) {
-    if (e?.name === 'AbortError') throw e;
+    if (e?.name === 'AbortError' || e instanceof SignInRequiredError) throw e;
     res = null;
   }
   const isStream = res && res.ok && res.body && /ndjson/.test(res.headers.get('content-type') || '');
@@ -70,6 +71,7 @@ export async function streamChat(body: ChatRequestBody, onText: (full: string) =
     if (res && !res.ok && res.status !== 404 && res.status !== 502 && res.status !== 504) {
       let msg = '';
       try { msg = (await res.json())?.error || ''; } catch { /* ignore */ }
+      if (res.status === 401) throw new SignInRequiredError(msg || 'Please sign in to use the AI assistant.');
       if (res.status === 400 || res.status === 429) throw new Error(msg || `The AI service returned an error (${res.status}).`);
     }
     // Fallback: buffered route.

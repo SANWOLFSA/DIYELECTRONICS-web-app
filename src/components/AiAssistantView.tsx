@@ -11,6 +11,8 @@ import type { PreparedImage } from '../lib/media';
 import { streamChat, prewarmAi } from '../lib/aiStream';
 import CircuitMapView from './CircuitMapView';
 import type { CircuitMapResult } from './CircuitMapView';
+import { useOwnershipGate } from './OwnershipAgreementModal';
+import { isOwnershipSensitive } from '../lib/ownershipAgreement';
 
 interface BoardPhoto { title: string; thumbUrl: string; url: string; fullUrl?: string; pageUrl: string; source: string; credit: string; licenseUrl?: string | null }
 interface BoardLookup { query: string; photos: BoardPhoto[]; web: { title: string; url: string; snippet?: string; kind?: string; source?: string }[]; links: { label: string; url: string; kind: string }[] }
@@ -87,7 +89,15 @@ export default function AiAssistantView() {
   const [activePersonaId, setActivePersonaId] = useState('sanwolf');
   const activePersona = PERSONAS.find(p => p.id === activePersonaId) || PERSONAS[0];
   const [messages, setMessages] = useState<Message[]>(() => loadConversation(activePersona.id, activePersona.greeting));
-  const [input, setInput] = useState('');
+  // "Ask AI" buttons on fix guides open this page with ?ask=<problem>: type it in, the user presses send.
+  const [input, setInput] = useState(() => {
+    try {
+      const url = new URL(window.location.href);
+      const ask = url.searchParams.get('ask') || '';
+      if (ask) { url.searchParams.delete('ask'); window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash); }
+      return ask.slice(0, 1500);
+    } catch { return ''; }
+  });
   const [isGenerating, setIsGenerating] = useState(false);
   const [pending, setPending] = useState<{ id: string; img: PreparedImage; thumb: string; kind: 'photo' | 'frame' }[]>([]);
   const [processing, setProcessing] = useState<string | null>(null);
@@ -257,12 +267,19 @@ export default function AiAssistantView() {
     }
   };
 
+  const { gate: ownershipGate, modal: ownershipModal } = useOwnershipGate();
+
   const handleSend = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (isGenerating || processing) return;
     const text = input.trim();
     if (!text && !pending.length) return;
     if (mapMode && !text && !pending.length) return;
+    // FRP / account-removal / unlock questions: the Ownership Agreement must be accepted before sending.
+    if (text && isOwnershipSensitive(text) && !(await ownershipGate('ai'))) {
+      setNotice('Not sent. FRP and unlock help is only available after you accept the Ownership Agreement (for your own device or one you are authorised to repair).');
+      return;
+    }
     const images = pending.map(p => p.img);
     setInput('');
     setPending([]);
@@ -316,6 +333,7 @@ export default function AiAssistantView() {
         : 'flex flex-col h-[calc(100dvh-3.5rem)] w-full max-w-4xl mx-auto overflow-hidden'}
       style={fullscreen ? { paddingTop: 'env(safe-area-inset-top)' } : undefined}
     >
+      {ownershipModal}
       {/* Compact sticky header */}
       <div className="shrink-0 border-b border-stone-200 dark:border-stone-800 bg-white/90 dark:bg-stone-950/90 backdrop-blur px-2 sm:px-4">
         <div className="h-12 flex items-center gap-2">

@@ -5,6 +5,9 @@ import LanguagePicker from '../LanguagePicker';
 import { Languages, X as XIcon } from 'lucide-react';
 import { BookOpenCheck, BookOpen, GraduationCap, Timer, Gauge, Award } from 'lucide-react';
 import { RouteLink } from '../../hooks/usePathname';
+import { Lock } from 'lucide-react';
+import { useSignedIn } from '../../lib/signInGate';
+import LoginWall from '../LoginWall';
 import type { ThemeConfig } from '../../lib/theme';
 import TheoryLibrary from './TheoryLibrary';
 import ExamRoom from './ExamRoom';
@@ -48,6 +51,10 @@ export function buildTheoryHash(route: TheoryRoute): string {
 
 export default function TheoryHub({ themeConfig, courses = [], onCourseComplete }: { themeConfig?: ThemeConfig; courses?: Course[]; onCourseComplete?: (id: string, title: string) => void }) {
   const [route, setRoute] = useState<TheoryRoute>(() => parseTheoryHash(window.location.hash) ?? { tab: 'library' });
+  // Guests get a preview: the library list and the first pages of each book chapter. Topics open in the
+  // book (which enforces the preview); exams and courses need an account.
+  const { signedIn } = useSignedIn();
+  const guestLocked = (tab: TheoryRoute['tab']) => !signedIn && (tab === 'exam' || tab === 'courses');
 
   // Make sure the URL reflects the hub on mount, and follow back/forward navigation.
   useEffect(() => {
@@ -125,6 +132,7 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
             >
               <Icon className="w-4 h-4" />
               <span>{t.label}</span>
+              {guestLocked(t.id) && <Lock className="w-3.5 h-3.5 opacity-70" aria-label="Sign in required" />}
               <span className={`hidden xl:inline text-xs ${active ? 'text-white/75' : 'text-slate-400'}`}>· {t.hint}</span>
             </button>
           );
@@ -141,15 +149,22 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
       )}
       {(route.tab === 'library' || route.tab === 'book') && (
         <TheoryLibrary
-          topicId={route.tab === 'library' ? route.topicId : undefined}
-          onOpenTopic={id => navigate({ tab: 'library', topicId: id })}
+          topicId={route.tab === 'library' && signedIn ? route.topicId : undefined}
+          onOpenTopic={id => navigate(signedIn ? { tab: 'library', topicId: id } : { tab: 'book', topicId: id })}
           onCloseTopic={() => navigate({ tab: 'library' })}
           onStartExam={() => navigate({ tab: 'exam' })}
           onReadInBook={id => navigate({ tab: 'book', topicId: id })}
           primaryClass={primary}
         />
       )}
-      {route.tab === 'exam' && (
+      {guestLocked(route.tab) && (
+        <LoginWall
+          reason={route.tab === 'exam' ? 'Sign in to take chapter exams and practice tests. Your scores are saved to your account.' : 'Sign in to take the certified courses. It is free.'}
+          onBack={() => navigate({ tab: 'library' })}
+          onDismiss={() => navigate({ tab: 'library' })}
+        />
+      )}
+      {route.tab === 'exam' && signedIn && (
         <div className="flex items-center justify-end gap-2 -mb-2" data-notranslate>
           {examTr.busy && <span className="text-xs text-slate-500">Translating…</span>}
           <button type="button" onClick={() => setLangOpen(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"><Languages className="w-4 h-4" /> {examLang.native}</button>
@@ -163,12 +178,12 @@ export default function TheoryHub({ themeConfig, courses = [], onCourseComplete 
           </div>
         </div>
       )}
-      {route.tab === 'exam' && (
+      {route.tab === 'exam' && signedIn && (
         <div ref={examRef} dir={examLang.rtl ? 'rtl' : 'ltr'}>
         <ExamRoom key={route.subject || 'all'} initialSubject={THEORY_SUBJECTS.some(s => s.id === route.subject) ? route.subject as TheorySubjectId : undefined} onStudyTopic={id => navigate({ tab: 'library', topicId: id })} primaryClass={primary} />
         </div>
       )}
-      {route.tab === 'courses' && (
+      {route.tab === 'courses' && signedIn && (
         <Courses courses={courses} onCourseComplete={(id, title) => onCourseComplete?.(id, title)} embedded />
       )}
     </div>

@@ -4,6 +4,7 @@ import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { auth, db, isFirebaseConfigured } from '../lib/firebase';
 import { deviceLanguage, type Language } from '../lib/languages';
 import LanguagePicker from './LanguagePicker';
+import { authedFetch } from '../lib/signInGate';
 
 /** Stable short key for a video URL (Firestore doc id safe). */
 function videoKey(url: string) {
@@ -60,7 +61,7 @@ export function TranslatableVideo({ src, title, className = '' }: { src: string;
         try { const snap = await getDoc(doc(db, 'videoCaptions', `${key}_${l.code}`)); if (snap.exists()) vtt = String(snap.data().vtt || ''); } catch { /* not cached */ }
       }
       if (!vtt) {
-        const r = await fetch('/api/video-captions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: src, lang: l.code, langName: l.name }) });
+        const r = await authedFetch('/api/video-captions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: src, lang: l.code, langName: l.name }) }, 'Sign in to translate video subtitles.');
         const data = await r.json().catch(() => null);
         if (!r.ok || !data?.vtt) throw new Error(data?.error || 'Could not make subtitles right now.');
         vtt = data.vtt as string;

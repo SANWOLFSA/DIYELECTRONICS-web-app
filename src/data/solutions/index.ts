@@ -1,5 +1,6 @@
 // Generates the Solutions list for a leaf (type > brand > model > size) from the per-family
 // issue libraries, loaded on demand so each library chunk is code-split.
+import { buildEscalation } from '../../lib/escalation';
 import type { CatalogBrand, CatalogDeviceType, CatalogModel, CatalogSize, FamilyId, FamilyLibrary, IssueTemplate, Solution } from '../catalog/types';
 
 type Loader = () => Promise<FamilyLibrary>;
@@ -144,6 +145,7 @@ function toSolution(issue: IssueTemplate, ctx: SolutionContext, lib: FamilyLibra
     brandNote: brandNote || undefined,
     sizeNote,
     source: 'library',
+    escalation: buildEscalation({ causes: issue.causes.map(f), tests: issue.tests.map(f), fix: issue.fix.map(f) }),
   };
 }
 
@@ -170,6 +172,7 @@ export async function loadSolutions(ctx: SolutionContext): Promise<Solution[]> {
       safety: 'Unplug and discharge before opening. Follow the detailed safety notes in each solution below.',
       brandNote: notes?.['*'] || undefined,
       source: 'model-notes',
+      escalation: buildEscalation({ causes: legacy.commonIssues, tests: legacy.steps, fix: [] }),
     });
   }
 

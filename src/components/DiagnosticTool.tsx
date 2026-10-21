@@ -3,6 +3,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Activity, Sparkles, ShieldAlert, Wrench, Copy, ArrowRight, Volume2, AlertTriangle } from 'lucide-react';
 import { useBenchSpeech, playBenchBeep, speakBenchText } from '../hooks/useBenchSpeech';
 import HandsFreeBenchHUD from './HandsFreeBenchHUD';
+import EscalationSolutions from './EscalationSolutions';
+import { askAiPrompt, type EscalationStage } from '../lib/escalation';
 
 const PRESETS: Record<string, string[]> = {
   "Gaming Consoles": [
@@ -69,6 +71,8 @@ interface DiagnosisResult {
   requiredTools: string[];
   testPoints: string[];
   steps: DiagnosisStep[];
+  /** Solution A -> B -> C (newer server responses). */
+  solutions?: EscalationStage[];
   partToSource: string;
   whenToStop: string;
 }
@@ -534,7 +538,15 @@ ${result.partToSource ? `Part to source: ${result.partToSource}\n` : ''}${result
                 </div>
               )}
 
-              {result.steps && (
+              {result.solutions && result.solutions.length > 0 ? (
+                <div className="space-y-3">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-stone-700 dark:text-stone-300">Fix it step by step</h4>
+                  <EscalationSolutions
+                    stages={result.solutions}
+                    askPrompt={askAiPrompt({ device: [category, model].filter(Boolean).join(' '), problem: `${symptom}${result.probableCause ? ` (the diagnostic tool suggested: ${result.probableCause})` : ''}`, tried: result.solutions })}
+                  />
+                </div>
+              ) : result.steps && (
                 <div className="space-y-3">
                   <h4 className="text-xs font-bold uppercase tracking-wider text-stone-700 dark:text-stone-300">Recommended Step-by-Step Resolution</h4>
                   <div className="space-y-3">

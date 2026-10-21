@@ -9,6 +9,7 @@ export const CONTENT_POLICY_POINTS = [
   'Chat, comments and posts are open: talk and joke about anything, it does not have to be about repairs.',
   'The only things not allowed are inappropriate pictures or videos: sexual or nude content, assault, violence or gore, and hateful or threatening images.',
   'Anyone can tap Report on a video, a person, a seller or a listing. Reports go to an admin who reviews them by hand; nothing is removed automatically.',
+  'FRP, unlock and account-removal guides and videos (and Phone Tricks) open only after you accept the Ownership Agreement: use them only on devices you own or are authorised to repair, never on lost, stolen or found devices. Content is posted by community members; DIY Electronics does not make, check or endorse it and is not accountable for how it is used. Misuse may be a crime and is your own responsibility. We may remove content, suspend accounts that break these rules, and co-operate with lawful requests from authorities.',
 ];
 
 export const CONTENT_POLICY_SHORT = 'Repair videos are never blocked, and you can talk about anything. Only inappropriate pictures or videos (sexual content, assault, violence, hate) are removed, after an admin reviews the report.';

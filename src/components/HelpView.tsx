@@ -4,6 +4,7 @@ import Markdown from 'react-markdown';
 import { SUPPORT_EMAIL } from '../lib/brand';
 import { HELP_TOPICS } from '../data/helpContent';
 import { streamChat, prewarmAi } from '../lib/aiStream';
+import { ensureSignedIn, SignInRequiredError } from '../lib/signInGate';
 
 type Turn = { role: 'user' | 'model'; text: string };
 
@@ -19,6 +20,7 @@ function HelpAssistant() {
   const ask = async (q: string) => {
     const message = q.trim();
     if (!message || busy) return;
+    if (!ensureSignedIn('Sign in to ask the AI Help Assistant. The help guides below are free to read.')) return;
     setErr(null); setInput('');
     const history = turns.slice(-6);
     setTurns((t) => [...t, { role: 'user', text: message }]);
@@ -29,8 +31,8 @@ function HelpAssistant() {
         if (!started) { started = true; setTurns((t) => [...t, { role: 'model', text: full }]); }
         else setTurns((t) => { const c = [...t]; c[c.length - 1] = { role: 'model', text: full }; return c; });
       });
-    } catch {
-      setErr('The help assistant is busy right now. The guides below cover every feature.');
+    } catch (e) {
+      setErr(e instanceof SignInRequiredError ? 'Sign in to use the Help Assistant.' : 'The help assistant is busy right now. The guides below cover every feature.');
     } finally { setBusy(false); }
   };
   const examples = ['How do I report a seller?', 'How do I translate a video?', 'How do I map a circuit from a photo?', 'Where is my exam score saved?'];
@@ -111,6 +113,8 @@ export default function HelpView({ onNavigate }: { onNavigate?: (tab: string) =>
           );
         })}
       </section>
+
+      <p className="text-xs text-stone-500 dark:text-stone-400">Using the app means you agree to our <a href="/terms" onClick={(e) => { e.preventDefault(); onNavigate?.('terms'); }} className="font-bold text-cobalt-600 hover:underline">Terms of Use</a> (safety, AI limits, ownership, user content and liability) and, for Phone Tricks and FRP / unlock content, the Ownership Agreement above.</p>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <button type="button" onClick={() => onNavigate?.('guides')} className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-4 text-left hover:border-cobalt-400">

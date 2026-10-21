@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
 import PhonesPage from './components/PhonesPage';
@@ -16,6 +16,7 @@ const SupportView = lazy(() => import('./components/SupportView'));
 import BlueprintViewer from './components/BlueprintViewer';
 import SettingsView from './components/SettingsView';
 import AboutView from './components/AboutView';
+import TermsView from './components/TermsView';
 import HelpView from './components/HelpView';
 import UserDatabaseManager from './components/UserDatabaseManager';
 import FileStorageManager from './components/FileStorageManager';
@@ -24,6 +25,10 @@ import DeviceDirectoryView from './components/catalog/LazyDeviceDirectory';
 import { usePathname, navigate } from './hooks/usePathname';
 import SessionTimeoutWatcher from './components/SessionTimeoutWatcher';
 import NotFound from './components/NotFound';
+import LoginWall, { signInWallWasOpen } from './components/LoginWall';
+import { OwnershipAgreementModal } from './components/OwnershipAgreementModal';
+import { isOwnershipSensitive, syncOwnershipFromProfile, useOwnershipAccepted } from './lib/ownershipAgreement';
+import { GUEST_TABS, gateEnabled, SIGNIN_REQUIRED_EVENT, LOGIN_SUCCESS_EVENT } from './lib/signInGate';
 const TheoryHub = lazy(() => import('./components/theory/TheoryHub'));
 const MultimeterPage = lazy(() => import('./components/meter/MultimeterPage'));
 const AdminDesk = lazy(() => import('./components/AdminDesk'));
@@ -38,7 +43,7 @@ import { doc, getDoc, collection, addDoc, serverTimestamp } from 'firebase/fires
 import { initialGuides, initialCourses, initialPosts } from './data';
 import type { UserProfile, Guide, ForumPost } from './types';
 
-const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'support', 'help', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
+const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'support', 'help', 'terms', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
 const TAB_ALIASES: Record<string, string> = { learning: 'theory', studies: 'theory', courses: 'theory', electrical_theory: 'theory', exam_room: 'theory', forum: 'home', parts: 'components', spare_parts: 'components' };
 /**
  * Old routes that were merged into another page. They redirect (replace) to the canonical URL:
@@ -100,6 +105,12 @@ export default function App() {
   const pendingVerificationsCount = usePendingVerificationsCount(isAdmin);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authChecked, setAuthChecked] = useState<boolean>(!isFirebaseConfigured);
+  // Guest preview + login wall (see lib/signInGate.ts). A "guest" is anyone without a Firebase sign-in,
+  // including people who pressed "Continue as guest".
+  const signedIn = !gateEnabled || !!firebaseUser;
+  const ownershipAccepted = useOwnershipAccepted();
+  const [wallReason, setWallReason] = useState<string | null>(null);
+  const [wallOpen, setWallOpen] = useState<boolean>(() => gateEnabled && signInWallWasOpen());
   
   const [savedGuideIds, setSavedGuideIds] = useState<string[]>(() => storage.getSavedGuideIds());
   const [selectedGuide, setSelectedGuide] = useState<Guide | null>(null);
@@ -156,6 +167,7 @@ export default function App() {
           const docSnap = await getDoc(docRef);
           if (docSnap.exists()) {
             const profile = docSnap.data() as UserProfile;
+            syncOwnershipFromProfile(docSnap.data());
             setCurrentUser(profile);
             setIsAuthenticated(true);
             storage.setIsAuthenticated(true);
@@ -167,6 +179,51 @@ export default function App() {
       }
     });
     return () => unsubscribe();
+  }, []);
+
+  // Pages and actions ask for sign-in through a window event; the wall closes by itself once signed in.
+  useEffect(() => {
+    const onRequire = (e: Event) => {
+      if (!gateEnabled || auth.currentUser) return;
+      setWallReason((e as CustomEvent).detail?.reason || null);
+      setWallOpen(true);
+    };
+    const onLogin = (e: Event) => {
+      const profile = (e as CustomEvent).detail?.profile as UserProfile | undefined;
+      if (!profile) return;
+      setCurrentUser(profile);
+      setIsAuthenticated(true);
+      storage.setIsAuthenticated(true);
+      storage.saveUserProfile(profile);
+      setWallOpen(false);
+      setWallReason(null);
+    };
+    window.addEventListener(SIGNIN_REQUIRED_EVENT, onRequire);
+    window.addEventListener(LOGIN_SUCCESS_EVENT, onLogin);
+    return () => {
+      window.removeEventListener(SIGNIN_REQUIRED_EVENT, onRequire);
+      window.removeEventListener(LOGIN_SUCCESS_EVENT, onLogin);
+    };
+  }, []);
+  useEffect(() => { if (firebaseUser) { setWallOpen(false); setWallReason(null); } }, [firebaseUser]);
+
+  // Gated pages: everything except the guest tabs (and every repair-hub route).
+  const routeGated = !signedIn && (isHub || !GUEST_TABS.has(activeTab));
+  // Where "Back" on a gated page goes: the last page this guest could see.
+  const lastOpenPath = useRef<string>('/');
+  useEffect(() => {
+    if (!routeGated) lastOpenPath.current = window.location.pathname + window.location.search + window.location.hash;
+  }, [routeGated, pathname, urlSearch]);
+  const leaveGatedRoute = useCallback(() => {
+    const back = lastOpenPath.current && lastOpenPath.current !== window.location.pathname ? lastOpenPath.current : '/';
+    navigate(back, { replace: true });
+    if (back.includes('#')) window.dispatchEvent(new HashChangeEvent('hashchange'));
+  }, []);
+  const closeWall = useCallback(() => { setWallOpen(false); setWallReason(null); }, []);
+  /** "Account" / sign-in prompts: guests get the login wall, members the account modal. */
+  const openAuth = useCallback(() => {
+    if (gateEnabled && !auth.currentUser) { setWallReason(null); setWallOpen(true); }
+    else setIsAuthModalOpen(true);
   }, []);
 
   // Non-admins who land on /admin are sent home once auth + admin checks resolve.
@@ -291,7 +348,19 @@ export default function App() {
   };
 
 
-  if (!isAuthenticated) {
+  const gatedReason = activeTab === 'ai_assistant' || activeTab === 'diagnostic' ? 'Sign in to use the SANWOLF AI assistant and circuit maps. It is free.'
+    : activeTab === 'marketplace' ? 'Sign in to buy, sell and see listing details in the marketplace.'
+    : null;
+
+  // A gated page for a guest: the full-screen login wall (after sign-in the page opens right here).
+  if (routeGated) {
+    if (!authChecked) return <div className="min-h-[100dvh] flex items-center justify-center bg-slate-950 text-sm text-slate-400">Loading…</div>;
+    return <LoginWall reason={gatedReason} onBack={leaveGatedRoute} />;
+  }
+
+  // Signed-out visitors who have not chosen "Continue as guest" see the landing page on /.
+  // (Guests can still open the free preview pages directly: /about, /help, /support, /theory.)
+  if (!isAuthenticated && (!gateEnabled || activeTab === 'home')) {
     return (
       <LandingPage 
         darkMode={darkMode} 
@@ -340,7 +409,9 @@ export default function App() {
           pendingVerificationsCount={pendingVerificationsCount}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode(!darkMode)}
-          onOpenAccount={() => setIsAuthModalOpen(true)}
+          onOpenAccount={openAuth}
+          isGuest={!signedIn}
+          isTabLocked={(id: string) => !signedIn && !GUEST_TABS.has(id)}
           onSignOut={handleSignOut}
         />
 
@@ -354,7 +425,7 @@ export default function App() {
               onAddReply={handleAddReply} 
               onToggleLike={handleToggleLike} 
               themeConfig={currentTheme} 
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={openAuth}
               onSelectMarketplace={handleSelectMarketplace}
             />
           )}
@@ -363,7 +434,7 @@ export default function App() {
               savedGuideIds={savedGuideIds} 
               onToggleSaveGuide={handleToggleSaveGuide}
               onSourcePart={handleSourcePart}
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={openAuth}
             />
           )}
           {activeTab === 'phones' && <PhonesPage themeConfig={currentTheme} onNavigateTo3D={() => setActiveTab('blueprint_viewer')} />}
@@ -372,17 +443,17 @@ export default function App() {
               themeConfig={currentTheme} 
               currentUser={currentUser}
               initialView={activeTab === 'social_annotator' ? 'annotator' : 'boardview'}
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={openAuth}
             />
           )}
           {isHub && (
             <Suspense fallback={hubFallback}>
-              <HubRoutes onOpenAuth={() => setIsAuthModalOpen(true)} />
+              <HubRoutes onOpenAuth={openAuth} />
             </Suspense>
           )}
           {activeTab === 'guides' && !isHub && (
             <Suspense fallback={hubFallback}>
-              <HubRoutes onOpenAuth={() => setIsAuthModalOpen(true)} />
+              <HubRoutes onOpenAuth={openAuth} />
             </Suspense>
           )}
           {activeTab === 'guides' && !isHub && (
@@ -416,7 +487,7 @@ export default function App() {
               initialSearchQuery={initialSearchQuery || searchQuery || urlQ} 
               onSelectPartDetail={handleSourcePart}
               themeConfig={currentTheme}
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={openAuth}
             />
           )}
 
@@ -464,6 +535,8 @@ export default function App() {
             <Suspense fallback={hubFallback}><SupportView /></Suspense>
           )}
 
+          {activeTab === 'terms' && <TermsView />}
+
           {activeTab === 'about' && (
             <AboutView />
           )}
@@ -479,7 +552,7 @@ export default function App() {
               onOpenGuide={(g) => setSelectedGuide(g)}
               onRemoveSavedGuide={handleToggleSaveGuide}
               onNavigateToGuides={() => setActiveTab('guides')}
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={openAuth}
             />
           )}
 
@@ -492,7 +565,11 @@ export default function App() {
       </div>
 
       {/* Guide Detail Modal */}
-      {selectedGuide && (
+      {/* FRP / unlock guides open with the Ownership Agreement first (Cancel closes the guide). */}
+      {selectedGuide && !ownershipAccepted && isOwnershipSensitive(selectedGuide.title) && (
+        <OwnershipAgreementModal onAgree={() => undefined} onCancel={() => setSelectedGuide(null)} />
+      )}
+      {selectedGuide && (ownershipAccepted || !isOwnershipSensitive(selectedGuide.title)) && (
         <GuideDetail 
           guide={selectedGuide}
           onClose={() => setSelectedGuide(null)}
@@ -501,6 +578,11 @@ export default function App() {
           onToggleSaveGuide={handleToggleSaveGuide}
           isSaved={savedGuideIds.includes(selectedGuide.id)}
         />
+      )}
+
+      {/* "Sign in to continue" for gated actions on the free pages (AI help, posting, exams...) */}
+      {wallOpen && !signedIn && (
+        <LoginWall reason={wallReason} onBack={closeWall} onDismiss={closeWall} />
       )}
 
       {/* Ends the session after SESSION_MAX_HOURS (default 5h) */}

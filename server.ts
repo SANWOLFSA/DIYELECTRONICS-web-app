@@ -77,7 +77,7 @@ async function getSecureTokenCerts(): Promise<Record<string, string>> {
   return certs;
 }
 
-async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | null> {
+export async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | null> {
   try {
     const [h, p, sig] = token.split('.');
     if (!h || !p || !sig) return null;
@@ -102,6 +102,14 @@ async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | n
     return null;
   }
 }
+
+/** Reads `Authorization: Bearer <token>` and verifies it. Shared with netlify/functions/chat-stream.mts. */
+export async function verifyAuthorizationHeader(authHeader: string | null | undefined): Promise<{ uid: string } | null> {
+  const h = authHeader || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+  return token ? verifyFirebaseIdToken(token) : null;
+}
+export const SIGN_IN_REQUIRED = 'Please sign in to use this feature.';
 
 /** Express middleware: requires `Authorization: Bearer <Firebase ID token>`. */
 async function requireFirebaseUser(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -321,6 +329,7 @@ const AI_UNAVAILABLE = 'The AI service is busy or unavailable right now. Please 
 const CHAT_SAFETY_RULES = `Safety and policy rules (always apply):
 - Never give instructions to bypass, remove or defeat Factory Reset Protection (FRP), Google account locks, iCloud Activation Lock, carrier/network locks, screen passcodes or any other anti-theft protection, even if the user says it is their own device. Politely decline the bypass and instead explain the legitimate owner routes: sign in with the original account, use official account recovery (accounts.google.com/signin/recovery or iforgot.apple.com), or take proof of purchase to the manufacturer, carrier or an authorised service centre.
 - Ordinary hardware diagnosis and repair of a locked device (screen, battery, charging, boards) is fine to help with.
+- FRP / Google, Samsung or iCloud account lock / unlock / account-removal requests (the user has accepted the in-app Ownership Agreement before such a message is sent): start the answer with exactly this one line: "Only for your own device or one you're authorised to repair." Then give the legitimate owner solutions in the Solution A -> If A didn't work: Solution B -> If B didn't work: Solution C -> Still not fixed? format with simple, explicit, physical steps. Typical order: A = sign in with the original account on the device (including waiting out the 24-72 h security delay after a recent password change, and using the right Wi-Fi), B = recover the account / password through official recovery (accounts.google.com/signin/recovery, Samsung account recovery or Samsung Find My Mobile unlock by the owner, iforgot.apple.com or Apple Support activation-lock request), C = take proof of purchase / proof of ownership and ID to the manufacturer, carrier or an authorised service centre for an official unlock. "Still not fixed?" = tell the AI what happened at each step. Official carrier SIM unlocks and manufacturer bootloader unlocks may be explained step by step. The rule above still applies: never give steps that defeat FRP, Activation Lock, account locks or passcodes.
 - Warn clearly about mains voltage, charged capacitors (the big primary filter cap can hold 300-400 V DC long after unplugging), CRT/inverter high voltage, microwave oven HV parts and lithium battery hazards whenever they are relevant. Say how to discharge safely.
 - If you are not sure, say so instead of inventing part numbers, measurements or prices.`;
 
@@ -334,8 +343,27 @@ const CHAT_METHOD = `How you work:
 - Photos / video frames: describe what you actually see (visible damage, bulging or leaking caps, burnt resistors, corrosion, cracked solder, missing parts, readable markings). Read printed part numbers only when legible; say "not legible" otherwise.
 - Web results and board photos supplied in the prompt are evidence: cite them inline as [1], [2] when you use them. Never invent part numbers, pinouts, schematics or voltages you do not know: say you are unsure and how to confirm (label, service manual, datasheet, measuring).
 - Be concrete with numbers: e.g. "standby 5 V on the CN801 pin marked 5VSB", "big filter cap ~310-340 V DC on 230 V mains", "ESR under 0.5 ohm for a 1000 uF 25 V low-ESR cap".
-- End with one suggested next action on its own line starting with "Next:", e.g. "Next: Map this board (tap + then Map circuit)", "Next: Upload a clear photo of the power supply board", or "Next: measure the 12 V rail and tell me the reading".
+- After the "Still not fixed?" section you may add one suggested next action on its own line starting with "Next:", e.g. "Next: Map this board (tap + then Map circuit)", "Next: Upload a clear photo of the power supply board", or "Next: measure the 12 V rail and tell me the reading".
 - Format in clean Markdown: short headings, bullets, and Markdown tables for measurements / colour codes when helpful. Keep it scannable on a phone.`;
+
+/**
+ * Every fix or solution the app gives uses this step-by-step escalation format (user requirement,
+ * Oct 2026). Shared by /api/chat, /api/chat-stream (Express) and netlify/functions/chat-stream.mts,
+ * which all build their prompt through prepareChat() below.
+ */
+const SOLUTION_FORMAT = `Solution format (ALWAYS use this whenever you give a fix, repair, troubleshooting or "how do I solve" answer):
+1. Start with ONE short line naming the most likely cause, then any safety warning in bold (keep every safety warning that applies).
+2. "### Solution A" = the easiest, cheapest and most likely fix. Numbered steps.
+3. "### If A didn't work: Solution B" = the next most likely fix. Numbered steps.
+4. "### If B didn't work: Solution C" = the next fix (usually deeper, e.g. board-level or part replacement). Numbered steps.
+5. End with "### Still not fixed?" and say: "Tell me what happened at each step, or send a photo, and I will guide you further." If the remaining fix is dangerous (mains, high voltage, gas, swollen battery) or needs specialist tools, say plainly that a professional repair is the safer choice.
+How to write every step (so simple a complete beginner can follow it, like guiding a blind person to their food):
+- Each step = a short **bold action title** (3-7 words, starts with a verb), then one or two plain sentences: exactly what to do, where to tap/press/touch (which button, which side, which screw, which connector, which menu), what you should see, hear or measure when it is right, and why you are doing it.
+- Be explicit and physical: "Turn the phone face down. Find the two tiny screws next to the charging port at the bottom edge." Never "check the hardware".
+- No jargon without a quick explanation in brackets the first time, e.g. "ESR (how badly a capacitor has worn out inside)", "standby rail (the small power supply that stays on when the TV is off)".
+- Give the expected reading with units for every measurement and say which meter setting to use and where the red and black probes go.
+- Keep it scannable on a phone: no long paragraphs; 2-6 steps per solution.
+For a simple factual question (not a fault), answer normally without the A/B/C sections.`;
 
 /** Whitelisted chat modes. The client sends a mode id; it can never send its own system prompt. */
 const CHAT_PERSONAS: Record<string, string> = {
@@ -343,8 +371,11 @@ const CHAT_PERSONAS: Record<string, string> = {
   codefox: `You are CODEFOX, the DIY Electronics embedded-systems expert. You help with microcontrollers (Arduino, ESP32, Raspberry Pi, STM32), firmware, and C/C++/Python code. Give complete, working code examples, debugging tips and exact wiring (pin to pin). Apply the same answer-first, one-question, "Next:" style; the step-by-step method applies to debugging hardware and code.`,
   circuitbear: `You are CIRCUITBEAR, the DIY Electronics circuit-design expert. You help with circuit theory, calculations (show the formula and the numbers), PCB layout, power delivery and schematic analysis.`,
   tutor: `You are a friendly, precise electrical and electronics engineering tutor inside the DIY Electronics study app. Teach step by step, show units in every calculation, use SI units and South African conventions where relevant (230/400 V, 50 Hz, SANS 10142-1). Keep answers focused (under about 250 words unless asked for more) with short Markdown headings, bullets and inline formulas. If a question involves live mains work, remind the student about safe isolation. If you are not sure of a fact, say so.`,
-  help: `You are the DIY Electronics in-app Help Assistant. Answer questions about HOW TO USE THE APP, using only the help guide below. Give short numbered steps, name the exact buttons and menus, and say plainly when the guide does not cover something (suggest emailing support). For repair questions, suggest asking SANWOLF in the AI Assistant.\n\nHELP GUIDE:\n${HELP_TEXT}`,
-  'phone-repair': `You are the DIY Electronics phone repair expert. Write practical, step-by-step troubleshooting and repair guides for smartphones. Include a "Required tools" section when relevant.`,
+  help: `You are the DIY Electronics in-app Help Assistant. Answer questions about HOW TO USE THE APP, using only the help guide below. Give short numbered steps, name the exact buttons and menus, and say plainly when the guide does not cover something (suggest emailing support). For repair questions, suggest asking SANWOLF in the AI Assistant.
+When the user has a PROBLEM with the app (something does not work, cannot find something, an error), use this format:
+"### Solution A" (the easiest and most likely fix, numbered steps) -> "### If A didn't work: Solution B" -> "### If B didn't work: Solution C" -> "### Still not fixed?" (ask the AI technician in the AI Assistant for repair problems, or email support for app problems, saying what happened at each step).
+Each step: a short **bold action title** (starts with a verb), then one or two plain sentences saying exactly where to tap (which corner, which menu, which button label), what you should see after tapping, and why. Write so a complete beginner can follow it; explain any technical word in brackets. For a simple "where is X" question, just give the numbered steps.\n\nHELP GUIDE:\n${HELP_TEXT}`,
+  'phone-repair': `You are the DIY Electronics phone repair expert. Write practical, step-by-step troubleshooting and repair guides for smartphones. Include a "Required tools" section when relevant (before Solution A).`,
 };
 // Older clients used the persona id "sanwolf" for the main assistant.
 CHAT_PERSONAS.sanwolf = CHAT_PERSONAS.copilot;
@@ -391,7 +422,7 @@ export async function prepareChat(body: any): Promise<ChatPrep> {
   const instruction = isTutor
     ? `${persona}${context ? `\n\nStudy context (from the app):\n${context}` : ''}\n\n${CHAT_SAFETY_RULES}`
     : isHelp ? persona
-    : `${persona}\n\n${CHAT_METHOD}\n\n${CHAT_SAFETY_RULES}`;
+    : `${persona}\n\n${CHAT_METHOD}\n\n${SOLUTION_FORMAT}\n\n${CHAT_SAFETY_RULES}`;
 
   let historyChars = current.images.reduce((n, i) => n + i.data.length, 0);
   const maxTurns = isTutor ? 8 : MAX_CHAT_HISTORY_TURNS; // the tutor keeps a short context for speed
@@ -451,7 +482,7 @@ async function boardPayload(prep: ChatPrep, waitMs: number) {
 }
 
 // API routes FIRST
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", requireFirebaseUser, async (req, res) => {
   const startedAt = Date.now();
   const prep = await prepareChat(req.body);
   if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
@@ -575,7 +606,7 @@ export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEven
 }
 
 app.get('/api/chat-stream', (req, res) => res.json({ ok: true, warm: true }));
-app.post('/api/chat-stream', async (req, res) => {
+app.post('/api/chat-stream', requireFirebaseUser, async (req, res) => {
   const prep = await prepareChat(req.body);
   if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
   res.status(200);
@@ -590,7 +621,7 @@ app.post('/api/chat-stream', async (req, res) => {
 // Electrical Theory Exam Room: generate extra practice questions as JSON.
 // Uses the server-side Gemini cascade; the key never reaches the browser.
 const THEORY_LEVELS = ["school", "college", "university"] as const;
-app.post("/api/theory/generate-questions", async (req, res) => {
+app.post("/api/theory/generate-questions", requireFirebaseUser, async (req, res) => {
   const body = req.body || {};
   const level = THEORY_LEVELS.includes(body.level) ? body.level : "college";
   const count = Math.min(10, Math.max(1, Number(body.count) || 5));
@@ -689,6 +720,7 @@ Provide a professional component diagnosis formatted with clean Markdown:
 2. **Failure Symptoms**: What happens when this component fails or shorts.
 3. **Bench Diagnostics**: diode-mode readings, resistance to ground, current-draw characteristics. Say clearly when values are typical rather than model-specific.
 4. **Replacement Protocol**: safe hot-air settings, flux/solder choice, pad prep, and verification before reassembly.
+5. **Fix it step by step**: lay out the repair as "### Solution A" (easiest / most likely fix), "### If A didn't work: Solution B", "### If B didn't work: Solution C", then "### Still not fixed?" (ask the AI technician with what happened at each step or a photo, or take it to a professional micro-soldering shop). Each step: a short **bold action title**, then one or two plain sentences saying exactly what to do, where to put the probes or tool, what you should see or measure, and why. Explain any jargon in brackets.
 If you are not certain of model-specific values, say so instead of inventing them.`;
 
     const systemInstruction = `You are the hardware diagnostic assistant for DIY Electronics. You specialize in component-level motherboard repairs, schematics tracing, and PCB diagnostics.`;
@@ -3299,7 +3331,7 @@ function sanitizeCircuitMap(raw: any, hasPhoto: boolean) {
   };
 }
 
-app.post('/api/circuit-map', async (req, res) => {
+app.post('/api/circuit-map', requireFirebaseUser, async (req, res) => {
   const startedAt = Date.now();
   const board = s(req.body?.board, 80);
   const symptom = s(req.body?.symptom, 400);
@@ -3347,7 +3379,7 @@ app.post('/api/circuit-map', async (req, res) => {
 const translateCache = new Map<string, string>();
 const tKey = (lang: string, s: string) => crypto.createHash('sha1').update(lang + '\u0000' + s).digest('base64');
 
-app.post('/api/translate', async (req, res) => {
+app.post('/api/translate', requireFirebaseUser, async (req, res) => {
   const lang = s(req.body?.lang, 20);
   const langName = s(req.body?.langName, 60) || lang;
   const texts: string[] = Array.isArray(req.body?.texts) ? req.body.texts.filter((x: any) => typeof x === 'string').slice(0, 200).map((x: string) => x.slice(0, 2000)) : [];
@@ -3386,7 +3418,7 @@ ${JSON.stringify(missing.map((m) => m.x))}`;
 // and the answer must arrive within the 30 s function limit.
 const captionCache = new Map<string, string>();
 const MAX_CAPTION_VIDEO_BYTES = 18 * 1024 * 1024;
-app.post('/api/video-captions', async (req, res) => {
+app.post('/api/video-captions', requireFirebaseUser, async (req, res) => {
   const url = typeof req.body?.url === 'string' ? req.body.url : '';
   const lang = s(req.body?.lang, 20);
   const langName = s(req.body?.langName, 60) || lang;
@@ -3824,11 +3856,15 @@ Return ONLY valid JSON with this structure:
   "safetyWarning": "The most important safety precaution for this repair",
   "requiredTools": ["Tool", "..."],
   "testPoints": ["A measurement to take and what a good vs bad reading looks like", "..."],
-  "steps": [ { "stepNumber": 1, "title": "Short title", "detail": "What to do" } ],
+  "solutions": [
+    { "label": "A", "heading": "The easiest, most likely fix (what it targets)", "steps": [ { "title": "Short bold action title starting with a verb", "detail": "One or two plain sentences: exactly what to do, where to touch/tap/put the probes, what you should see or measure, and why." } ] },
+    { "label": "B", "heading": "If A didn't work: the next most likely fix", "steps": [ ... ] },
+    { "label": "C", "heading": "If B didn't work: the deeper fix", "steps": [ ... ] }
+  ],
   "partToSource": "Name/part number of the most likely replacement part, or empty string if unknown",
   "whenToStop": "When the user should stop and take it to a professional"
 }
-Rules: Base severity on safety risk and damage risk. Do not invent exact part numbers or measurements you are unsure of; say a value is typical when it is. Do not include prices or confidence percentages. Never suggest bypassing FRP, iCloud/Activation Lock or other anti-theft locks.`;
+Rules: Exactly three solutions A, B, C in order from easiest/most likely to hardest, 2-5 steps each, written so a complete beginner can follow them (explicit and physical, explain any jargon in brackets, give meter settings and expected readings with units). Base severity on safety risk and damage risk. Do not invent exact part numbers or measurements you are unsure of; say a value is typical when it is. Do not include prices or confidence percentages. Never suggest bypassing FRP, iCloud/Activation Lock or other anti-theft locks.`;
 
   try {
     const text = await callGeminiWithCascade(
@@ -3842,6 +3878,18 @@ Rules: Base severity on safety risk and damage risk. Do not invent exact part nu
     if (!parsed.probableCause) throw new Error('AI returned no diagnosis');
     const severities = ['Low', 'Medium', 'High', 'Critical'];
     const strList = (v: any, n: number) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).slice(0, n) : []);
+    const LABELS = ['A', 'B', 'C'] as const;
+    let solutions = (Array.isArray(parsed.solutions) ? parsed.solutions : []).slice(0, 3).map((sol: any, i: number) => ({
+      label: LABELS[i],
+      heading: String(sol?.heading || '').slice(0, 200),
+      steps: (Array.isArray(sol?.steps) ? sol.steps : []).slice(0, 6)
+        .map((st: any) => ({ title: String(st?.title || '').slice(0, 80), detail: String(st?.detail || '').slice(0, 600) }))
+        .filter((st: any) => st.title || st.detail),
+    })).filter((sol: any) => sol.steps.length) as { label: 'A' | 'B' | 'C'; heading: string; steps: { title: string; detail: string }[] }[];
+    // Older model output (flat "steps"): keep it as Solution A rather than dropping it.
+    if (!solutions.length && Array.isArray(parsed.steps)) {
+      solutions = [{ label: 'A', heading: String(parsed.probableCause).slice(0, 200), steps: parsed.steps.slice(0, 8).map((st: any, i: number) => ({ title: String(st?.title || `Step ${i + 1}`), detail: String(st?.detail || '') })) }];
+    }
     return res.json({
       diagnosis: {
         probableCause: String(parsed.probableCause),
@@ -3850,13 +3898,10 @@ Rules: Base severity on safety risk and damage risk. Do not invent exact part nu
         safetyWarning: typeof parsed.safetyWarning === 'string' ? parsed.safetyWarning : '',
         requiredTools: strList(parsed.requiredTools, 12),
         testPoints: strList(parsed.testPoints, 10),
-        steps: Array.isArray(parsed.steps)
-          ? parsed.steps.slice(0, 10).map((s: any, i: number) => ({
-              stepNumber: Number(s?.stepNumber) || i + 1,
-              title: String(s?.title || `Step ${i + 1}`),
-              detail: String(s?.detail || ''),
-            }))
-          : [],
+        solutions,
+        // Flat list kept for older clients and the hands-free "read steps" voice command.
+        steps: solutions.flatMap((sol) => sol.steps.map((st) => ({ title: `Solution ${sol.label}: ${st.title}`, detail: st.detail })))
+          .slice(0, 15).map((st, i) => ({ stepNumber: i + 1, ...st })),
         partToSource: typeof parsed.partToSource === 'string' ? parsed.partToSource.slice(0, 120) : '',
         whenToStop: typeof parsed.whenToStop === 'string' ? parsed.whenToStop : '',
       },

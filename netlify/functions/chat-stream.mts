@@ -1,7 +1,8 @@
 // Streaming AI chat for /api/chat-stream (Netlify Functions v2 can stream a Response body;
 // the Express app in api.ts is wrapped by serverless-http, which buffers the whole answer).
 // The chat logic itself lives in server.ts (prepareChat / streamChat) so local dev and
-// production behave the same. Events are newline-delimited JSON.
+// production behave the same (including the system prompt, so the Solution A/B/C answer format
+// in SOLUTION_FORMAT applies here too). Events are newline-delimited JSON.
 type Context = { ip?: string };
 
 process.env.NETLIFY = process.env.NETLIFY || 'true'; // server.ts must not start its own HTTP server here
@@ -13,7 +14,12 @@ export default async (req: Request, context: Context) => {
     return new Response(JSON.stringify({ ok: true, warm: true }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
   }
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
-  const { prepareChat, streamChat, rateLimitOk } = await serverPromise;
+  const { prepareChat, streamChat, rateLimitOk, verifyAuthorizationHeader, SIGN_IN_REQUIRED } = await serverPromise;
+  // Members only: the browser sends its Firebase ID token (same check as the Express AI routes).
+  const user = await verifyAuthorizationHeader(req.headers.get('authorization'));
+  if (!user) {
+    return new Response(JSON.stringify({ error: SIGN_IN_REQUIRED }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
   const ip = context?.ip || req.headers.get('x-nf-client-connection-ip') || 'unknown';
   if (!rateLimitOk(ip)) {
     return new Response(JSON.stringify({ error: 'Too many requests. Please wait a few minutes and try again.' }), { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '300' } });
