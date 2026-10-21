@@ -82,7 +82,10 @@ service cloud.firestore {
 
       // Ownership Agreement (FRP & unlock guides): the owner records acceptance as the server time.
       function ownershipAgreementOk(d) {
-        return !('ownershipAgreementAt' in d) || d.ownershipAgreementAt is timestamp;
+        return (!('ownershipAgreementAt' in d) || d.ownershipAgreementAt is timestamp)
+          // Terms of Use acceptance recorded at sign-up / sign-in.
+          && (!('termsAcceptedAt' in d) || d.termsAcceptedAt is timestamp)
+          && (!('termsVersion' in d) || (d.termsVersion is string && d.termsVersion.size() <= 32));
       }
 
       allow read: if isOwner(userId) || isAdmin();

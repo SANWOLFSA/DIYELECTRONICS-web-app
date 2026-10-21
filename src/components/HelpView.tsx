@@ -114,6 +114,8 @@ export default function HelpView({ onNavigate }: { onNavigate?: (tab: string) =>
         })}
       </section>
 
+      <p className="text-xs text-stone-500 dark:text-stone-400">Using the app means you agree to our <a href="/terms" onClick={(e) => { e.preventDefault(); onNavigate?.('terms'); }} className="font-bold text-cobalt-600 hover:underline">Terms of Use</a> (safety, AI limits, ownership, user content and liability) and, for Phone Tricks and FRP / unlock content, the Ownership Agreement above.</p>
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <button type="button" onClick={() => onNavigate?.('guides')} className="bg-white dark:bg-stone-900 border border-stone-200 dark:border-stone-800 rounded-2xl p-4 text-left hover:border-cobalt-400">
           <BookOpen className="w-5 h-5 text-amber-500" /><h3 className="mt-2 text-sm font-bold text-stone-900 dark:text-stone-100">Repair guides</h3><p className="text-xs text-stone-500">Step-by-step repairs and teardowns.</p>

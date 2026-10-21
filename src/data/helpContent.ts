@@ -10,6 +10,12 @@ export const HELP_TOPICS: HelpTopic[] = [
     'When you name a board or model number, real board photos and listings found online (iFixit, Wikipedia, Wikimedia Commons) appear under the answer with their sources.',
     'Tap the expand icon (top right) for full screen. "New chat" starts over. AI answers can be wrong: always confirm with your meter and the service manual.',
   ] },
+  { id: 'terms', title: 'Terms of Use (the rules for using the app)', steps: [
+    'Open Terms of Use from the menu (under You), from the page footer, or from About. It starts with an "In plain words" summary, then the full numbered sections.',
+    'In short: the app is free educational help provided as is, not professional advice; repairs are at your own risk; the AI is an automated tool that can be wrong, so check safety-critical steps and do not send it passwords or payment details; only work on devices you own or may repair; you are responsible for what you post; marketplace deals are between buyers and sellers.',
+    'You must be 13 or older, and under 18 you need a parent or guardian\'s consent. One account per person.',
+    'To report content or send a takedown notice, tap Report on it or email support with a link and what is wrong.',
+  ] },
   { id: 'ownership-agreement', title: 'Ownership Agreement (Phone Tricks, FRP & unlock guides)', steps: [
     'Phone Tricks, and any video, guide or AI question about FRP, bypassing, unlocking, or Google / Samsung / iCloud account removal, first shows the Ownership Agreement. Tick the box and tap "Agree & Continue". You only do this once per device (it is also saved to your account when signed in).',
     '1. You will only use these guides on a phone or device you own, or one you have the owner\'s written permission to repair.',

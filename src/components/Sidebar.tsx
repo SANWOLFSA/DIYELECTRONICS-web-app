@@ -1,6 +1,6 @@
 import {
   GraduationCap, Home, Smartphone, BookOpen, ShoppingBag, Bot, Settings, Info, HelpCircle, ShieldCheck,
-  FileText, Heart, Search, Microchip, ScanSearch, Award, Activity, Cpu, Gauge, LogOut, LogIn, Lock, Moon, Sun, TrendingUp, Wrench, X,
+  FileText, Heart, Search, Microchip, ScanSearch, Award, Activity, Cpu, Gauge, LogOut, LogIn, Lock, ScrollText, Moon, Sun, TrendingUp, Wrench, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { UserProfile } from '../types';
@@ -82,6 +82,7 @@ export default function Sidebar({
         { id: 'help', label: 'Help', icon: HelpCircle },
         { id: 'about', label: 'About', icon: Info },
         { id: 'support', label: 'Support the app', icon: Heart },
+        { id: 'terms', label: 'Terms of Use', icon: ScrollText },
       ],
     },
   ];

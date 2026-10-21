@@ -17,7 +17,7 @@ export const SIGNIN_REQUIRED_EVENT = 'app:require-signin';
 export const LOGIN_SUCCESS_EVENT = 'app:login-success';
 
 /** Main tabs a guest may open. Every other tab (and every hub route) shows the login wall. */
-export const GUEST_TABS = new Set(['home', 'about', 'help', 'support', 'theory', 'not_found']);
+export const GUEST_TABS = new Set(['home', 'about', 'help', 'support', 'terms', 'theory', 'not_found']);
 
 export const gateEnabled = isFirebaseConfigured;
 

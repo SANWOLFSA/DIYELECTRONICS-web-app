@@ -94,7 +94,7 @@ export default function LandingPage({
       </main>
 
       <footer className="relative z-10 py-4 px-4 text-center text-[11px] text-white/80 bg-black/20 backdrop-blur-sm">
-        © {new Date().getFullYear()} DIY Electronics · Right to Repair
+        © {new Date().getFullYear()} DIY Electronics · Right to Repair · <a href="/terms" className="underline hover:text-white">Terms of Use</a> · <a href="/terms#privacy" className="underline hover:text-white">Privacy</a> · <a href="/about" className="underline hover:text-white">About</a> · <a href="/help" className="underline hover:text-white">Help</a>
       </footer>
     </div>
   );

@@ -1,6 +1,7 @@
 import { Info, ShieldCheck, Cpu, Leaf, Users, Flag } from 'lucide-react';
 import { USER_CONTENT_DISCLAIMER, CONTENT_POLICY_POINTS } from '../config/policy';
 import { ShieldAlert } from 'lucide-react';
+import { navigate } from '../hooks/usePathname';
 import { OWNERSHIP_AGREEMENT_CLAUSES, OWNERSHIP_AGREEMENT_INTRO, OWNERSHIP_AGREEMENT_NOTICE, OWNERSHIP_AGREEMENT_TITLE } from '../lib/ownershipAgreement';
 
 export default function AboutView() {
@@ -58,6 +59,7 @@ export default function AboutView() {
         <p className="text-xs text-stone-600 dark:text-stone-400">Phone Tricks, FRP / unlock / account-removal guides and videos, and AI answers about them open only after you accept this agreement. {OWNERSHIP_AGREEMENT_INTRO}</p>
         <ol className="text-xs text-stone-600 dark:text-stone-400 leading-relaxed list-decimal pl-5 space-y-1">{OWNERSHIP_AGREEMENT_CLAUSES.map((c) => <li key={c}>{c}</li>)}</ol>
         <p className="text-xs font-semibold text-stone-700 dark:text-stone-300">{OWNERSHIP_AGREEMENT_NOTICE}</p>
+        <a href="/terms" onClick={(e) => { e.preventDefault(); navigate('/terms'); }} className="inline-flex text-xs font-bold text-cobalt-600 hover:underline">Read the full Terms of Use →</a>
       </div>
 
       <div className="bg-stone-900 text-stone-100 dark:bg-stone-900 dark:border dark:border-stone-800 rounded-3xl p-8 space-y-6">

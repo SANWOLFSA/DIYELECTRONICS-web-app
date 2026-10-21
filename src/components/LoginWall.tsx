@@ -97,6 +97,8 @@ export default function LoginWall({
             />
           </div>
 
+          <p className="mt-3 text-center text-[11px] text-white/85 [text-shadow:0_1px_2px_rgb(0_0_0/0.5)]">By continuing you agree to the <a href="/terms" target="_blank" rel="noopener" className="underline font-semibold">Terms of Use</a>.</p>
+
           <div className="mt-4 rounded-2xl bg-black/30 backdrop-blur-sm border border-white/15 p-3">
             <p className="text-[11px] text-white/75 text-center mb-2">Free to browse without an account</p>
             <div className="grid grid-cols-4 gap-1.5 text-[11px]">

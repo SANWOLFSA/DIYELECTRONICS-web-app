@@ -40,7 +40,7 @@ export function OwnershipAgreementModal({ mode = 'view', onAgree, onCancel }: { 
         <p className="mt-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 px-3 py-2 text-xs font-semibold text-amber-900 dark:text-amber-200">{OWNERSHIP_AGREEMENT_NOTICE}</p>
         <label className="mt-4 flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3 cursor-pointer">
           <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} className="mt-0.5 w-5 h-5 accent-cobalt-600 shrink-0" />
-          <span className="text-sm font-semibold">{OWNERSHIP_AGREEMENT_CHECKBOX}</span>
+          <span className="text-sm font-semibold">{OWNERSHIP_AGREEMENT_CHECKBOX} <span className="font-normal text-slate-500 dark:text-slate-400">(including the <a href="/terms" target="_blank" rel="noopener" className="underline font-semibold">Terms of Use</a>)</span></span>
         </label>
         {mode === 'upload' && (
           <label className="mt-2 flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 p-3 cursor-pointer">
@@ -48,7 +48,8 @@ export function OwnershipAgreementModal({ mode = 'view', onAgree, onCancel }: { 
             <span className="text-sm font-semibold">{OWNERSHIP_UPLOAD_CHECKBOX}</span>
           </label>
         )}
-        <div className="mt-4 flex gap-2">
+        <p className="mt-3 text-[11px] text-slate-500 dark:text-slate-400">This agreement is part of our <a href="/terms" target="_blank" rel="noopener" className="underline font-semibold">Terms of Use</a>.</p>
+        <div className="mt-3 flex gap-2">
           <button type="button" onClick={onCancel} className="flex-1 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-800">Cancel</button>
           <button type="button" onClick={agree} disabled={!ok || busy} className="flex-1 py-2.5 rounded-xl bg-cobalt-600 hover:bg-cobalt-500 text-white text-sm font-bold disabled:opacity-40">Agree &amp; Continue</button>
         </div>

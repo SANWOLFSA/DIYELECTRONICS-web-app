@@ -16,6 +16,7 @@ const SupportView = lazy(() => import('./components/SupportView'));
 import BlueprintViewer from './components/BlueprintViewer';
 import SettingsView from './components/SettingsView';
 import AboutView from './components/AboutView';
+import TermsView from './components/TermsView';
 import HelpView from './components/HelpView';
 import UserDatabaseManager from './components/UserDatabaseManager';
 import FileStorageManager from './components/FileStorageManager';
@@ -42,7 +43,7 @@ import { doc, getDoc, collection, addDoc, serverTimestamp } from 'firebase/fires
 import { initialGuides, initialCourses, initialPosts } from './data';
 import type { UserProfile, Guide, ForumPost } from './types';
 
-const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'support', 'help', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
+const ROUTED_TABS = ['home', 'devices', 'phones', 'blueprint_viewer', '3d_viewer', 'social_annotator', 'guides', 'diagnostic', 'circuit', 'marketplace', 'theory', 'multimeter', 'ai_assistant', 'user_db', 'file_storage', 'settings', 'about', 'support', 'help', 'terms', 'progress', 'admin', 'search', 'device', 'components', 'answers', 'teardowns', 'contributors'];
 const TAB_ALIASES: Record<string, string> = { learning: 'theory', studies: 'theory', courses: 'theory', electrical_theory: 'theory', exam_room: 'theory', forum: 'home', parts: 'components', spare_parts: 'components' };
 /**
  * Old routes that were merged into another page. They redirect (replace) to the canonical URL:
@@ -533,6 +534,8 @@ export default function App() {
           {activeTab === 'support' && (
             <Suspense fallback={hubFallback}><SupportView /></Suspense>
           )}
+
+          {activeTab === 'terms' && <TermsView />}
 
           {activeTab === 'about' && (
             <AboutView />
