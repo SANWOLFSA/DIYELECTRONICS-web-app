@@ -9,6 +9,7 @@ import {
 import type { TheoryLevel, TheoryQuestion, TheorySubjectId, TheoryTopic } from '../../data/theory';
 import { readBestScores, recordScore, syncBestScoresFromCloud } from '../../lib/theoryProgress';
 import type { TheoryBestScore } from '../../lib/theoryProgress';
+import { authedFetch } from '../../lib/signInGate';
 
 const COUNTS = [5, 10, 20, 30, 50];
 const SECONDS_PER_QUESTION = 90;
@@ -173,7 +174,7 @@ export default function ExamRoom({ onStudyTopic, primaryClass, initialSubject }:
       .slice(0, 40)
       .map(t => ({ id: t.id, title: t.title, subject: t.subject }));
     try {
-      const res = await fetch('/api/theory/generate-questions', {
+      const res = await authedFetch('/api/theory/generate-questions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ level: cfg.level, subjects, topics: topicList, count: 5 }),

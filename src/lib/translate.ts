@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { LANGUAGE_BY_CODE, deviceLanguage, type Language } from './languages';
+import { isSignedIn, SignInRequiredError, withAuth } from './signInGate';
 
 const BOOK_LANG_KEY = 'diy_book_lang';
 export function getBookLanguage(): Language {
@@ -43,8 +44,11 @@ export async function translateTexts(texts: string[], lang: Language): Promise<s
     cur.push(t); size += t.length;
   }
   if (cur.length) batches.push(cur);
+  // AI translation needs an account. Guests still get anything already cached on this device; no wall
+  // pops up here because the book auto-translates into the phone's language on open.
+  if (batches.length && !isSignedIn()) throw new SignInRequiredError('Sign in to translate into other languages.');
   await Promise.all(batches.map(async (b) => {
-    const r = await fetch('/api/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texts: b, lang: lang.code, langName: lang.name }) });
+    const r = await fetch('/api/translate', await withAuth({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texts: b, lang: lang.code, langName: lang.name }) }));
     const data = await r.json().catch(() => null);
     if (!r.ok || !Array.isArray(data?.translations)) throw new Error(data?.error || 'Translation failed.');
     b.forEach((t, i) => { if (typeof data.translations[i] === 'string') cache[hash(t)] = data.translations[i]; });

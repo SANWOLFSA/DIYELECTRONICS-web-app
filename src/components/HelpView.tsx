@@ -4,6 +4,7 @@ import Markdown from 'react-markdown';
 import { SUPPORT_EMAIL } from '../lib/brand';
 import { HELP_TOPICS } from '../data/helpContent';
 import { streamChat, prewarmAi } from '../lib/aiStream';
+import { ensureSignedIn, SignInRequiredError } from '../lib/signInGate';
 
 type Turn = { role: 'user' | 'model'; text: string };
 
@@ -19,6 +20,7 @@ function HelpAssistant() {
   const ask = async (q: string) => {
     const message = q.trim();
     if (!message || busy) return;
+    if (!ensureSignedIn('Sign in to ask the AI Help Assistant. The help guides below are free to read.')) return;
     setErr(null); setInput('');
     const history = turns.slice(-6);
     setTurns((t) => [...t, { role: 'user', text: message }]);
@@ -29,8 +31,8 @@ function HelpAssistant() {
         if (!started) { started = true; setTurns((t) => [...t, { role: 'model', text: full }]); }
         else setTurns((t) => { const c = [...t]; c[c.length - 1] = { role: 'model', text: full }; return c; });
       });
-    } catch {
-      setErr('The help assistant is busy right now. The guides below cover every feature.');
+    } catch (e) {
+      setErr(e instanceof SignInRequiredError ? 'Sign in to use the Help Assistant.' : 'The help assistant is busy right now. The guides below cover every feature.');
     } finally { setBusy(false); }
   };
   const examples = ['How do I report a seller?', 'How do I translate a video?', 'How do I map a circuit from a photo?', 'Where is my exam score saved?'];

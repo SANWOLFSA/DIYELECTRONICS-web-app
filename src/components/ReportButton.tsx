@@ -3,6 +3,7 @@ import { Flag, Star, X, Loader2, CheckCircle2 } from 'lucide-react';
 import { auth } from '../lib/firebase';
 import { REPORT_REASONS, hasReported, submitReport, submitReview, useCommunityReviews, type ReportTarget } from '../lib/reports';
 import { CONTENT_POLICY_SHORT } from '../config/policy';
+import { requestSignIn } from '../lib/signInGate';
 
 /** "Report" button + form (reason, details, optional star review). Reports go to admins; nothing is blocked automatically. */
 export function ReportButton({ targetType, targetId, targetLabel, allowReview = true, onNeedAuth, className = '' }: {
@@ -15,7 +16,7 @@ export function ReportButton({ targetType, targetId, targetLabel, allowReview = 
   if (uid && uid === targetId) return null; // you cannot report yourself
   return (
     <>
-      <button type="button" onClick={() => (uid ? setOpen(true) : onNeedAuth?.())}
+      <button type="button" onClick={() => (uid ? setOpen(true) : (onNeedAuth ? onNeedAuth() : requestSignIn('Sign in to report or review.')))}
         className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 ${className}`}>
         <Flag className="w-3.5 h-3.5" /> {done ? 'Reported' : 'Report'}
       </button>

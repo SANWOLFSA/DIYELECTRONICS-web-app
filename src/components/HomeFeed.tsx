@@ -5,6 +5,7 @@ import type { ForumPost, UserProfile } from '../types';
 import type { ThemeConfig } from '../lib/theme';
 import { useCommunity, compressImage, type CommunityPost } from '../lib/community';
 import { useMarketplaceListings, requestListingFocus, type ListingItem } from '../lib/marketplaceListings';
+import { isSignedIn } from '../lib/signInGate';
 import MarketplaceStories from './home/MarketplaceStories';
 import CommunityPostCard from './home/CommunityPostCard';
 import { RouteLink } from '../hooks/usePathname';
@@ -92,7 +93,7 @@ export default function HomeFeed({
 
   /** Gate for any write action. */
   const requireAuth = (post?: CommunityPost) => {
-    if (!api.signedIn) {
+    if (!api.signedIn || !isSignedIn()) {
       promptSignIn();
       return false;
     }

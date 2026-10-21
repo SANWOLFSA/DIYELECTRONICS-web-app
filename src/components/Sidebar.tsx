@@ -1,6 +1,6 @@
 import {
   GraduationCap, Home, Smartphone, BookOpen, ShoppingBag, Bot, Settings, Info, HelpCircle, ShieldCheck,
-  FileText, Heart, Search, Microchip, ScanSearch, Award, Activity, Cpu, Gauge, LogOut, Moon, Sun, TrendingUp, Wrench, X,
+  FileText, Heart, Search, Microchip, ScanSearch, Award, Activity, Cpu, Gauge, LogOut, LogIn, Lock, Moon, Sun, TrendingUp, Wrench, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { UserProfile } from '../types';
@@ -14,6 +14,9 @@ interface SidebarProps {
   /** Desktop: icon-only rail. */
   collapsed?: boolean;
   currentUser: UserProfile;
+  /** Not signed in: gated items show a lock and the footer offers "Sign in". */
+  isGuest?: boolean;
+  isTabLocked?: (id: string) => boolean;
   /** From useAdminStatus().isAdmin; never decided by email here. */
   isAdmin?: boolean;
   pendingVerificationsCount?: number;
@@ -28,7 +31,7 @@ type Group = { title: string; items: Item[] };
 
 export default function Sidebar({
   activeTab, onSelectTab, isOpen, onCloseMobile, collapsed = false, currentUser, isAdmin = false,
-  pendingVerificationsCount, darkMode, onToggleDarkMode, onOpenAccount, onSignOut,
+  pendingVerificationsCount, darkMode, onToggleDarkMode, onOpenAccount, onSignOut, isGuest = false, isTabLocked,
 }: SidebarProps) {
   const groups: Group[] = [
     {
@@ -140,6 +143,7 @@ export default function Sidebar({
                   >
                     <Icon className={`w-[18px] h-[18px] shrink-0 ${active ? 'text-cobalt-600 dark:text-cobalt-400' : ''}`} strokeWidth={1.9} />
                     <span className={`truncate flex-1 ${hideWhenCollapsed}`}>{item.label}</span>
+                    {isTabLocked?.(item.id) && <Lock className={`w-3.5 h-3.5 shrink-0 text-slate-400 ${hideWhenCollapsed}`} aria-label="Sign in required" />}
                     {item.badge && (
                       <span className={`px-1.5 py-0.5 rounded-md bg-red-600 text-white text-[10px] font-semibold ${c ? 'lg:absolute lg:top-0.5 lg:right-1' : ''}`}>{item.badge}</span>
                     )}
@@ -164,11 +168,19 @@ export default function Sidebar({
             {darkMode ? <Sun className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} /> : <Moon className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />}
             <span className={`flex-1 ${hideWhenCollapsed}`}>{darkMode ? 'Light mode' : 'Dark mode'}</span>
           </button>
+          {isGuest ? (
+          <button type="button" onClick={() => { onCloseMobile(); onOpenAccount(); }} title={c ? 'Sign in' : undefined}
+            className={`${rowBase} ${rowPad} text-cobalt-700 dark:text-cobalt-300 hover:bg-cobalt-50 dark:hover:bg-cobalt-500/10`}>
+            <LogIn className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />
+            <span className={`flex-1 ${hideWhenCollapsed}`}>Sign in</span>
+          </button>
+          ) : (
           <button type="button" onClick={() => { onCloseMobile(); onSignOut(); }} title={c ? 'Sign out' : undefined}
             className={`${rowBase} ${rowPad} text-slate-600 dark:text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10 dark:hover:text-red-400`}>
             <LogOut className="w-[18px] h-[18px] shrink-0" strokeWidth={1.9} />
             <span className={`flex-1 ${hideWhenCollapsed}`}>Sign out</span>
           </button>
+          )}
         </div>
       </aside>
     </>

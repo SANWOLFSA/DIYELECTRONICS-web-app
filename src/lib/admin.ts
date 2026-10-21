@@ -37,12 +37,16 @@ const NOT_ADMIN: AdminStatus = {
   loading: false,
 };
 
+/** Owner accounts that always see the admin UI (merged with VITE_ADMIN_EMAILS). */
+export const DEFAULT_ADMIN_EMAILS = ['sbheko1@gmail.com', 'diy.electronicsa@gmail.com', 'sanwolfza@gmail.com'];
+
 function bootstrapEmails(): string[] {
   const raw = (import.meta.env.VITE_ADMIN_EMAILS as string | undefined) || '';
-  return raw
+  const fromEnv = raw
     .split(',')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
+  return [...new Set([...DEFAULT_ADMIN_EMAILS, ...fromEnv])];
 }
 
 async function checkRulesAdmin(user: User): Promise<boolean> {

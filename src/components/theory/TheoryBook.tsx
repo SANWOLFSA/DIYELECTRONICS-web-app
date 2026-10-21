@@ -12,7 +12,8 @@ import { LevelPills } from './LevelPills';
 import { readBestScores } from '../../lib/theoryProgress';
 import { getBookLanguage, setBookLanguage, useDomTranslate } from '../../lib/translate';
 import LanguagePicker from '../LanguagePicker';
-import { Languages } from 'lucide-react';
+import { Languages, Lock } from 'lucide-react';
+import { requestSignIn, useSignedIn } from '../../lib/signInGate';
 import { CheckCircle2, XCircle, RotateCcw, HelpCircle, ShieldAlert, Sparkles } from 'lucide-react';
 
 /**
@@ -33,7 +34,11 @@ type Page =
   | { kind: 'asection'; id: string; chapter: AuthoredChapter; section: BookSection; chapterNo: number; sectionNo: number }
   | { kind: 'asummary'; id: string; chapter: AuthoredChapter; chapterNo: number }
   | { kind: 'aquiz'; id: string; chapter: AuthoredChapter; chapterNo: number }
+  | { kind: 'locked'; id: string; chapterNo: number; title: string; remaining: number }
   | { kind: 'glossary'; id: string };
+
+/** Pages a guest may read per chapter (chapter opener + the first topic's two pages). */
+const PREVIEW_PAGES_PER_CHAPTER = 3;
 
 type GlossaryEntry = { term: string; definition: string; topicId: string; kind: 'topic' | 'term'; aliases: string[]; pageId?: string };
 
@@ -68,6 +73,33 @@ function buildPages(topics: TheoryTopic[]): Page[] {
   return pages;
 }
 
+const chapterNoOf = (p: Page): number => ('chapterNo' in p ? p.chapterNo : 0);
+function chapterName(p: Page): string {
+  if (p.kind === 'chapter') return subjectLabel(p.subject);
+  if (p.kind === 'aopen') return p.chapter.title;
+  return '';
+}
+
+/**
+ * Guest preview: the first PREVIEW_PAGES_PER_CHAPTER pages of every chapter (never its exam), then a
+ * "sign in to keep reading" page. Cover, contents and glossary stay.
+ */
+function buildPreviewPages(all: Page[]): Page[] {
+  const out: Page[] = [];
+  let chapter = 0, kept = 0, hidden = 0, name = '';
+  const closeChapter = () => {
+    if (chapter && hidden) out.push({ kind: 'locked', id: `lock:${chapter}`, chapterNo: chapter, title: name, remaining: hidden });
+  };
+  for (const p of all) {
+    const ch = chapterNoOf(p);
+    if (!ch) { closeChapter(); chapter = 0; out.push(p); continue; }
+    if (ch !== chapter) { closeChapter(); chapter = ch; kept = 0; hidden = 0; name = chapterName(p); }
+    if (p.kind !== 'aquiz' && kept < PREVIEW_PAGES_PER_CHAPTER) { out.push(p); kept++; } else hidden++;
+  }
+  closeChapter();
+  return out;
+}
+
 function pageText(p: Page): { title: string; text: string } {
   switch (p.kind) {
     case 'cover': return { title: 'Cover', text: 'Electrical theory book' };
@@ -87,6 +119,7 @@ function pageText(p: Page): { title: string; text: string } {
     case 'asection': return { title: `${p.section.heading} (${p.chapter.title})`, text: `${p.section.question || ''} ${p.section.body.join(' ')} ${(p.section.bullets || []).join(' ')} ${(p.section.table?.rows || []).map(r => r.join(' ')).join(' ')} ${p.section.note?.text || ''}` };
     case 'asummary': return { title: `Chapter ${p.chapterNo} summary: ${p.chapter.title}`, text: p.chapter.summary.join(' ') };
     case 'aquiz': return { title: `Chapter ${p.chapterNo} exam: ${p.chapter.title}`, text: p.chapter.quiz.map(q => q.prompt).join(' ') };
+    case 'locked': return { title: `Chapter ${p.chapterNo}: sign in to keep reading`, text: p.title };
     case 'glossary': return { title: 'Glossary & index', text: '' };
   }
 }
@@ -178,9 +211,18 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
   // The book (pages, glossary, exams) is translated into the reader's language on demand.
   const tr = useDomTranslate(rootRef, lang, [topics ? 1 : 0]);
 
-  const pages = useMemo(() => (topics ? buildPages(topics) : []), [topics]);
+  // Guests read a preview (first pages of each chapter); members get the whole book.
+  const { signedIn } = useSignedIn();
+  const fullPages = useMemo(() => (topics ? buildPages(topics) : []), [topics]);
+  const pages = useMemo(() => (signedIn ? fullPages : buildPreviewPages(fullPages)), [fullPages, signedIn]);
   const pageIndexById = useMemo(() => new Map(pages.map((p, i) => [p.id, i])), [pages]);
-  const topicFirstPage = useCallback((topicId: string) => pageIndexById.get(`t:${topicId}:1`) ?? 0, [pageIndexById]);
+  const topicFirstPage = useCallback((topicId: string) => {
+    const idx = pageIndexById.get(`t:${topicId}:1`);
+    if (idx !== undefined) return idx;
+    // Preview: a topic past the free pages opens its chapter's "sign in to keep reading" page.
+    const full = fullPages.find(p => p.id === `t:${topicId}:1`);
+    return (full && pageIndexById.get(`lock:${chapterNoOf(full)}`)) ?? 0;
+  }, [pageIndexById, fullPages]);
   const entryPage = useCallback((e: { topicId: string; pageId?: string }) => (e.pageId && pageIndexById.has(e.pageId) ? pageIndexById.get(e.pageId)! : topicFirstPage(e.topicId)), [pageIndexById, topicFirstPage]);
 
   const searchIndex = useMemo(() => pages.map(p => {
@@ -283,7 +325,7 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
   useLayoutEffect(() => {
     if (!pages.length) return;
     let idx = 0;
-    if (startTopicId && pageIndexById.has(`t:${startTopicId}:1`)) idx = topicFirstPage(startTopicId);
+    if (startTopicId && (pageIndexById.has(`t:${startTopicId}:1`) || !signedIn)) idx = topicFirstPage(startTopicId);
     else {
       try { const saved = localStorage.getItem(STORAGE_KEY); if (saved && pageIndexById.has(saved)) idx = pageIndexById.get(saved)!; } catch { /* ignore */ }
     }
@@ -339,6 +381,7 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
     : page.kind === 'topic' ? `Ch. ${page.chapterNo} · ${subjectLabel(page.topic.subject)}`
     : page.kind === 'chapter' || page.kind === 'summary' ? `Ch. ${page.chapterNo} · ${subjectLabel(page.subject)}`
     : page.kind === 'aopen' || page.kind === 'asection' || page.kind === 'asummary' || page.kind === 'aquiz' ? `Ch. ${page.chapterNo} · ${page.chapter.title}`
+    : page.kind === 'locked' ? `Ch. ${page.chapterNo} · ${page.title}`
     : page.kind === 'glossary' ? 'Glossary & index' : 'Electrical Theory';
   const progress = pages.length ? ((current + 1) / pages.length) * 100 : 0;
 
@@ -608,6 +651,23 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
         </div>
       );
     }
+    if (p.kind === 'locked') {
+      return (
+        <div className="min-h-full flex flex-col items-center justify-center text-center gap-4 px-4 py-10">
+          <span className="w-14 h-14 rounded-2xl bg-cobalt-600 text-white flex items-center justify-center shadow-lg"><Lock className="w-7 h-7" /></span>
+          <p className="text-[11px] uppercase tracking-[0.25em] text-cobalt-600 dark:text-cobalt-300 font-semibold">Chapter {p.chapterNo} · Preview ends here</p>
+          <h2 className="text-2xl font-semibold text-slate-900 dark:text-white" style={serif}>Sign in to keep reading</h2>
+          <p className="text-[15px] text-slate-600 dark:text-slate-300 max-w-sm" style={serif}>
+            {p.remaining} more page{p.remaining === 1 ? '' : 's'} of {p.title || `chapter ${p.chapterNo}`}, the chapter exam, translations and the AI tutor are free with an account.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button type="button" onClick={() => requestSignIn('Sign in to read the whole Theory book and take the chapter exams. It is free.')} className="ds-btn-primary px-4 py-2 text-sm">Sign in to continue <ArrowRight className="w-4 h-4" /></button>
+            {i + 1 < pages.length && <button type="button" onClick={() => goTo(i + 1)} className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800">Next chapter preview</button>}
+          </div>
+          {pageNo}
+        </div>
+      );
+    }
     if (p.kind === 'aquiz') {
       return (
         <div className="py-6">
@@ -637,7 +697,7 @@ export default function TheoryBook({ startTopicId, onClose, onTakeQuiz }: { star
           <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Close book"><X className="w-5 h-5" /></button>
           <p className="flex-1 min-w-0 truncate text-sm font-medium text-slate-600 dark:text-slate-300 px-1">{chapterTitle}</p>
           {tr.busy && <Loader2 className="w-4 h-4 animate-spin text-cobalt-500 shrink-0" aria-label="Translating" />}
-          <button type="button" onClick={() => setPanel('lang')} className="px-2 py-1.5 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center gap-1 text-xs font-bold" aria-label={`Book language: ${lang.name}`} data-notranslate>
+          <button type="button" onClick={() => (signedIn ? setPanel('lang') : requestSignIn('Sign in to read the Theory book in other languages.'))} className="px-2 py-1.5 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center gap-1 text-xs font-bold" aria-label={`Book language: ${lang.name}`} data-notranslate>
             <Languages className="w-5 h-5" /><span className="uppercase">{lang.code.split('-')[0]}</span>
           </button>
           <button type="button" onClick={() => setPanel('search')} className="p-2 rounded-lg hover:bg-slate-200/70 dark:hover:bg-slate-800" aria-label="Find in book"><Search className="w-5 h-5" /></button>

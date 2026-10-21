@@ -77,7 +77,7 @@ async function getSecureTokenCerts(): Promise<Record<string, string>> {
   return certs;
 }
 
-async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | null> {
+export async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | null> {
   try {
     const [h, p, sig] = token.split('.');
     if (!h || !p || !sig) return null;
@@ -102,6 +102,14 @@ async function verifyFirebaseIdToken(token: string): Promise<{ uid: string } | n
     return null;
   }
 }
+
+/** Reads `Authorization: Bearer <token>` and verifies it. Shared with netlify/functions/chat-stream.mts. */
+export async function verifyAuthorizationHeader(authHeader: string | null | undefined): Promise<{ uid: string } | null> {
+  const h = authHeader || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+  return token ? verifyFirebaseIdToken(token) : null;
+}
+export const SIGN_IN_REQUIRED = 'Please sign in to use this feature.';
 
 /** Express middleware: requires `Authorization: Bearer <Firebase ID token>`. */
 async function requireFirebaseUser(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -451,7 +459,7 @@ async function boardPayload(prep: ChatPrep, waitMs: number) {
 }
 
 // API routes FIRST
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", requireFirebaseUser, async (req, res) => {
   const startedAt = Date.now();
   const prep = await prepareChat(req.body);
   if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
@@ -575,7 +583,7 @@ export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEven
 }
 
 app.get('/api/chat-stream', (req, res) => res.json({ ok: true, warm: true }));
-app.post('/api/chat-stream', async (req, res) => {
+app.post('/api/chat-stream', requireFirebaseUser, async (req, res) => {
   const prep = await prepareChat(req.body);
   if (prep.error) return res.status(prep.status || 400).json({ error: prep.error });
   res.status(200);
@@ -590,7 +598,7 @@ app.post('/api/chat-stream', async (req, res) => {
 // Electrical Theory Exam Room: generate extra practice questions as JSON.
 // Uses the server-side Gemini cascade; the key never reaches the browser.
 const THEORY_LEVELS = ["school", "college", "university"] as const;
-app.post("/api/theory/generate-questions", async (req, res) => {
+app.post("/api/theory/generate-questions", requireFirebaseUser, async (req, res) => {
   const body = req.body || {};
   const level = THEORY_LEVELS.includes(body.level) ? body.level : "college";
   const count = Math.min(10, Math.max(1, Number(body.count) || 5));
@@ -3299,7 +3307,7 @@ function sanitizeCircuitMap(raw: any, hasPhoto: boolean) {
   };
 }
 
-app.post('/api/circuit-map', async (req, res) => {
+app.post('/api/circuit-map', requireFirebaseUser, async (req, res) => {
   const startedAt = Date.now();
   const board = s(req.body?.board, 80);
   const symptom = s(req.body?.symptom, 400);
@@ -3347,7 +3355,7 @@ app.post('/api/circuit-map', async (req, res) => {
 const translateCache = new Map<string, string>();
 const tKey = (lang: string, s: string) => crypto.createHash('sha1').update(lang + '\u0000' + s).digest('base64');
 
-app.post('/api/translate', async (req, res) => {
+app.post('/api/translate', requireFirebaseUser, async (req, res) => {
   const lang = s(req.body?.lang, 20);
   const langName = s(req.body?.langName, 60) || lang;
   const texts: string[] = Array.isArray(req.body?.texts) ? req.body.texts.filter((x: any) => typeof x === 'string').slice(0, 200).map((x: string) => x.slice(0, 2000)) : [];
@@ -3386,7 +3394,7 @@ ${JSON.stringify(missing.map((m) => m.x))}`;
 // and the answer must arrive within the 30 s function limit.
 const captionCache = new Map<string, string>();
 const MAX_CAPTION_VIDEO_BYTES = 18 * 1024 * 1024;
-app.post('/api/video-captions', async (req, res) => {
+app.post('/api/video-captions', requireFirebaseUser, async (req, res) => {
   const url = typeof req.body?.url === 'string' ? req.body.url : '';
   const lang = s(req.body?.lang, 20);
   const langName = s(req.body?.langName, 60) || lang;
