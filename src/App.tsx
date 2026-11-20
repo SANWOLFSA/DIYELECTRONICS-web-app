@@ -358,9 +358,11 @@ export default function App() {
     return <LoginWall reason={gatedReason} onBack={leaveGatedRoute} />;
   }
 
-  // Signed-out visitors who have not chosen "Continue as guest" see the landing page on /.
-  // (Guests can still open the free preview pages directly: /about, /help, /support, /theory.)
-  if (!isAuthenticated && (!gateEnabled || activeTab === 'home')) {
+  // Anyone without a real sign-in sees the sign-in landing page on / (guest mode removed).
+  if (gateEnabled && !signedIn && activeTab === 'home' && !authChecked) {
+    return <div className="min-h-[100dvh] flex items-center justify-center bg-slate-950 text-sm text-slate-400">Loading…</div>;
+  }
+  if (gateEnabled ? (!signedIn && activeTab === 'home') : !isAuthenticated) {
     return (
       <LandingPage 
         darkMode={darkMode} 

@@ -131,15 +131,15 @@ export function friendlyAuthError(err: unknown): string {
     case 'auth/account-exists-with-different-credential':
       return 'This email is already linked to a different sign-in method. Use the method you signed up with.';
     case 'auth/unauthorized-domain':
-      return "Sign-in isn't enabled for this web address yet. Please use the official site or continue as a guest.";
+      return "Sign-in isn't enabled for this web address yet. Please use the official site.";
     case 'auth/operation-not-allowed':
-      return "This sign-in method isn't switched on yet. Please use another option or continue as a guest.";
+      return "This sign-in method isn't switched on yet. Please use another option.";
     case 'auth/user-disabled':
       return 'This account has been disabled. Please contact support.';
     case 'auth/api-key-not-valid':
     case 'auth/invalid-api-key':
     case 'auth/configuration-not-found':
-      return 'Online sign-in is temporarily unavailable. You can still continue as a guest.';
+      return 'Online sign-in is temporarily unavailable. Please try again in a few minutes.';
     default:
       return 'Something went wrong while signing in. Please try again.';
   }

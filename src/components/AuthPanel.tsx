@@ -47,7 +47,7 @@ function FacebookIcon() {
 export default function AuthPanel({
   onLoginSuccess,
   customBackground,
-  showGuest = true,
+  showGuest = false,
   notice,
   initialMode = 'signin'
 }: {
@@ -199,7 +199,7 @@ export default function AuthPanel({
       {cloudDisabled && (
         <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>Online accounts are unavailable right now. You can still explore as a guest.</span>
+          <span>Online accounts are unavailable right now. Please try again in a few minutes.</span>
         </div>
       )}
 

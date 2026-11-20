@@ -1,8 +1,8 @@
 /**
  * Guest preview + login wall.
  *
- * Guests (no Firebase sign-in) may browse the landing / home page, About, Help, Support and a
- * preview of the Theory book. Everything else asks them to sign in first. Pages and actions call
+ * Login only: visitors without a Firebase sign-in see the sign-in landing page and the Terms.
+ * Everything else asks them to sign in first (guest mode was removed). Pages and actions call
  * requestSignIn(); App shows the full-screen "Sign in to continue" panel and, after sign-in, the
  * user stays exactly where they were.
  *
@@ -17,7 +17,7 @@ export const SIGNIN_REQUIRED_EVENT = 'app:require-signin';
 export const LOGIN_SUCCESS_EVENT = 'app:login-success';
 
 /** Main tabs a guest may open. Every other tab (and every hub route) shows the login wall. */
-export const GUEST_TABS = new Set(['home', 'about', 'help', 'support', 'terms', 'theory', 'not_found']);
+export const GUEST_TABS = new Set(['home', 'terms', 'not_found']);
 
 export const gateEnabled = isFirebaseConfigured;
 
