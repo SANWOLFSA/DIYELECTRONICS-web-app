@@ -7,7 +7,7 @@
 # Secrets like GEMINI_API_KEY must NOT go here: set them in Netlify > Site configuration > Environment variables.
 [build.environment]
   VITE_FIREBASE_API_KEY = "AIzaSyAVRIBDhL7FGAWX7lW9j5BkSx3nSvp_-EU"
-  VITE_FIREBASE_AUTH_DOMAIN = "diyelectronics.netlify.app"
+  VITE_FIREBASE_AUTH_DOMAIN = "diyelectronics.beehivehub.co.za"
   VITE_FIREBASE_PROJECT_ID = "diy-electronic"
   VITE_FIREBASE_STORAGE_BUCKET = "diy-electronic.firebasestorage.app"
   VITE_FIREBASE_MESSAGING_SENDER_ID = "592657838678"
