@@ -316,6 +316,63 @@ async function callGeminiSmart(ai: GoogleGenAI, contents: any, systemInstruction
   }
 }
 
+
+// ---- Llama backup (Cloudflare Workers AI) ---------------------------------------------------
+// Used only when every Gemini model is busy or out of free quota. Free allowance: 10,000 Neurons a
+// day per Cloudflare account (resets 00:00 UTC); past that the call fails and the user sees the
+// normal "busy" message. Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN (Workers AI read/edit)
+// in Netlify > Environment variables. Both stay server-side.
+const LLAMA_TEXT_MODEL = process.env.LLAMA_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const LLAMA_VISION_MODEL = process.env.LLAMA_VISION_MODEL || '@cf/meta/llama-4-scout-17b-16e-instruct';
+const llamaConfigured = () => !!(process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_AI_TOKEN);
+
+/** Gemini-style contents -> OpenAI-style chat messages (photos become data: URLs). */
+function toLlamaMessages(contents: any[], systemInstruction?: string): { messages: any[]; hasImages: boolean } {
+  const messages: any[] = [];
+  let hasImages = false;
+  if (systemInstruction) messages.push({ role: 'system', content: systemInstruction });
+  for (const c of Array.isArray(contents) ? contents : []) {
+    const role = c?.role === 'model' ? 'assistant' : 'user';
+    const parts: any[] = Array.isArray(c?.parts) ? c.parts : [];
+    const content: any[] = [];
+    for (const p of parts) {
+      if (typeof p?.text === 'string' && p.text) content.push({ type: 'text', text: p.text });
+      else if (p?.inlineData?.data && role === 'user') {
+        hasImages = true;
+        content.push({ type: 'image_url', image_url: { url: `data:${p.inlineData.mimeType || 'image/jpeg'};base64,${p.inlineData.data}` } });
+      }
+    }
+    if (!content.length) continue;
+    const onlyText = content.every((x) => x.type === 'text');
+    messages.push({ role, content: onlyText ? content.map((x) => x.text).join('\n\n') : content });
+  }
+  return { messages, hasImages };
+}
+
+/** One non-streaming answer from Llama on Cloudflare. Throws when not set up, out of quota or slow. */
+export async function callLlamaBackup(contents: any[], systemInstruction?: string, timeoutMs = 20000): Promise<string> {
+  if (!llamaConfigured()) throw new Error('Llama backup is not configured.');
+  const { messages, hasImages } = toLlamaMessages(contents, systemInstruction);
+  const model = hasImages ? LLAMA_VISION_MODEL : LLAMA_TEXT_MODEL;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), Math.max(3000, timeoutMs));
+  try {
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_AI_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages, max_tokens: 2048 }),
+      signal: ctrl.signal,
+    });
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(`Llama ${r.status}: ${JSON.stringify(j?.errors || j?.error || j).slice(0, 200)}`);
+    const text = j?.choices?.[0]?.message?.content;
+    if (!text || typeof text !== 'string') throw new Error('Llama returned an empty answer');
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---- Shared AI route helpers --------------------------------------------------
 
 // Read ONLY the server-side key. Never fall back to a VITE_* variable: anything
@@ -495,11 +552,19 @@ app.post("/api/chat", requireFirebaseUser, async (req, res) => {
       ? await callGeminiWithCascade(ai, prep.contents, prep.instruction, undefined, { __models: orderModels(FAST_MODELS), __thinking: 'MINIMAL', __budgetMs: budget })
           .catch(() => callGeminiWithCascade(ai, prep.contents, prep.instruction, undefined, { __budgetMs: Math.max(6000, 23500 - (Date.now() - startedAt)) }))
       : await callGeminiSmart(ai, prep.contents, prep.instruction, { __budgetMs: budget });
-    if (!reply) return res.status(503).json({ error: AI_UNAVAILABLE });
+    if (!reply) throw new Error('Gemini returned no answer');
     cacheSet(prep.cacheKey, reply);
     res.json({ reply, source: 'gemini', board: await boardPayload(prep, Math.max(0, 26000 - (Date.now() - startedAt))) });
   } catch (error: any) {
     console.error("Gemini API Error in /api/chat:", error?.message || error);
+    // Backup: Llama on Cloudflare (free daily allowance) when Gemini is busy or out of quota.
+    try {
+      const reply = await callLlamaBackup(prep.contents, prep.instruction, Math.max(4000, 25500 - (Date.now() - startedAt)));
+      cacheSet(prep.cacheKey, reply);
+      return res.json({ reply, source: 'llama', board: await boardPayload(prep, 1500) });
+    } catch (e: any) {
+      console.warn('Llama backup failed:', e?.message || e);
+    }
     res.status(503).json({ error: AI_UNAVAILABLE });
   }
 });
@@ -587,7 +652,19 @@ export async function* streamChat(prep: ChatPrep): AsyncGenerator<ChatStreamEven
     setTimeout(() => finish(null), deadline - Date.now() + 200);
   });
 
-  if (!winner) { yield { error: AI_UNAVAILABLE }; return; }
+  if (!winner) {
+    // Backup: Llama on Cloudflare when every Gemini model is busy or out of free quota.
+    try {
+      const reply = await callLlamaBackup(prep.contents, prep.instruction, 15000);
+      cacheSet(prep.cacheKey, reply);
+      yield { t: reply, model: 'llama', ttft: Date.now() - startedAt };
+      yield { done: true, board: await boardPayload(prep, 1500) };
+    } catch (e: any) {
+      console.warn('Llama backup failed:', e?.message || e);
+      yield { error: AI_UNAVAILABLE };
+    }
+    return;
+  }
   let full = winner.first;
   yield { t: winner.first, model: winner.model, ttft: Date.now() - startedAt };
   try {

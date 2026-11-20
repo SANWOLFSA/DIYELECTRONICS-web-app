@@ -5,6 +5,7 @@
 
 # Firebase web config is public by design (it ships in the browser bundle), so it can live here.
 # Secrets like GEMINI_API_KEY must NOT go here: set them in Netlify > Site configuration > Environment variables.
+# Optional Llama backup (Cloudflare Workers AI): set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AI_TOKEN there too.
 [build.environment]
   VITE_FIREBASE_API_KEY = "AIzaSyAVRIBDhL7FGAWX7lW9j5BkSx3nSvp_-EU"
   VITE_FIREBASE_AUTH_DOMAIN = "diyelectronics.beehivehub.co.za"
